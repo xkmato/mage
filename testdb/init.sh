@@ -14,14 +14,14 @@ SCHEMA_FILE="${DIR}/schema.sql"
 
 echo "Dropping (if necessary) and creating database '${TEST_DB}'"
 
-psql -q -f "${DIR}/init.sql"
+psql -Upostgres -q -f "${DIR}/init.sql"
 
 echo "Dumping schema from local database..."
 
-pg_dump --schema-only --no-owner $1 > "${SCHEMA_FILE}"
+pg_dump -Upostgres --schema-only --no-owner $1 > "${SCHEMA_FILE}"
 
 echo "Loading Temba schema into '${TEST_DB}'"
 
-psql -q -d ${TEST_DB} -f "${SCHEMA_FILE}"
+psql -Upostgres -q -d ${TEST_DB} -f "${SCHEMA_FILE}"
 
 echo "Testing database initialized"

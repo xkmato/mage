@@ -75,220 +75,45 @@ COMMENT ON EXTENSION postgis_topology IS 'PostGIS topology spatial types and fun
 SET search_path = public, pg_catalog;
 
 --
--- Name: contact_check_update(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION contact_check_update() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF OLD.is_test != NEW.is_test THEN
-    RAISE EXCEPTION 'is_test cannot be changed';
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
-
-SET default_tablespace = '';
-
-SET default_with_oids = false;
-
---
--- Name: contacts_contact; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE contacts_contact (
-    id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
-    is_blocked boolean NOT NULL,
-    name character varying(128),
-    is_test boolean NOT NULL,
-    language character varying(3),
-    uuid character varying(36) NOT NULL,
-    is_failed boolean NOT NULL
-);
-
-
---
--- Name: contact_toggle_system_group(contacts_contact, character, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION contact_toggle_system_group(_contact contacts_contact, _group_type character, _add boolean) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  _group_id INT;
-BEGIN
-  PERFORM contact_toggle_system_group(_contact.id, _contact.org_id, _group_type, _add);
-END;
-$$;
-
-
---
--- Name: contact_toggle_system_group(integer, integer, character, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION contact_toggle_system_group(_contact_id integer, _org_id integer, _group_type character, _add boolean) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  _group_id INT;
-BEGIN
-  -- lookup the group id
-  SELECT id INTO STRICT _group_id FROM contacts_contactgroup
-  WHERE org_id = _org_id AND group_type = _group_type;
-
-  -- don't do anything if group doesn't exist for some inexplicable reason
-  IF _group_id IS NULL THEN
-    RETURN;
-  END IF;
-
-  IF _add THEN
-    BEGIN
-      INSERT INTO contacts_contactgroup_contacts (contactgroup_id, contact_id) VALUES (_group_id, _contact_id);
-    EXCEPTION WHEN unique_violation THEN
-      -- do nothing
-    END;
-  ELSE
-    DELETE FROM contacts_contactgroup_contacts WHERE contactgroup_id = _group_id AND contact_id = _contact_id;
-  END IF;
-END;
-$$;
-
-
---
--- Name: exec(text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION exec(text) RETURNS text
-    LANGUAGE plpgsql
-    AS $_$ BEGIN EXECUTE $1; RETURN $1; END; $_$;
-
-
---
--- Name: update_contact_system_groups(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION update_contact_system_groups() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  -- new contact added
-  IF TG_OP = 'INSERT' AND NEW.is_active AND NOT NEW.is_test THEN
-    IF NEW.is_blocked THEN
-      PERFORM contact_toggle_system_group(NEW, 'B', true);
-    ELSE
-      PERFORM contact_toggle_system_group(NEW, 'A', true);
-      IF NEW.is_failed THEN
-          PERFORM contact_toggle_system_group(NEW, 'F', true);
-      END IF;
-    END IF;
-  END IF;
-
-  -- existing contact updated
-  IF TG_OP = 'UPDATE' AND NOT NEW.is_test THEN
-    -- do nothing for inactive contacts
-    IF NOT OLD.is_active AND NOT NEW.is_active THEN
-      RETURN NULL;
-    END IF;
-
-    -- is being blocked
-    IF NOT OLD.is_blocked AND NEW.is_blocked THEN
-      PERFORM contact_toggle_system_group(NEW, 'A', false);
-      PERFORM contact_toggle_system_group(NEW, 'B', true);
-      PERFORM contact_toggle_system_group(NEW, 'F', false);
-    END IF;
-
-    -- is being unblocked
-    IF OLD.is_blocked AND NOT NEW.is_blocked THEN
-      PERFORM contact_toggle_system_group(NEW, 'A', true);
-      PERFORM contact_toggle_system_group(NEW, 'B', false);
-      IF NEW.is_failed THEN
-        PERFORM contact_toggle_system_group(NEW, 'F', true);
-      END IF;
-    END IF;
-
-    -- is being failed
-    IF NOT OLD.is_failed AND NEW.is_failed THEN
-      PERFORM contact_toggle_system_group(NEW, 'F', true);
-    END IF;
-
-    -- is being unfailed
-    IF OLD.is_failed AND NOT NEW.is_failed THEN
-      PERFORM contact_toggle_system_group(NEW, 'F', false);
-    END IF;
-
-    -- is being released
-    IF OLD.is_active AND NOT NEW.is_active THEN
-      PERFORM contact_toggle_system_group(NEW, 'A', false);
-      PERFORM contact_toggle_system_group(NEW, 'B', false);
-      PERFORM contact_toggle_system_group(NEW, 'F', false);
-    END IF;
-
-    -- is being unreleased
-    IF NOT OLD.is_active AND NEW.is_active THEN
-      IF NOT NEW.is_blocked THEN
-        PERFORM contact_toggle_system_group(NEW, 'A', false);
-      ELSE
-        PERFORM contact_toggle_system_group(NEW, 'B', false);
-      END IF;
-      IF NEW.is_failed THEN
-        PERFORM contact_toggle_system_group(NEW, 'F', false);
-      END IF;
-    END IF;
-
-  END IF;
-
-  RETURN NULL;
-END;
-$$;
-
-
---
 -- Name: update_group_count(); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION update_group_count() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  is_test BOOLEAN;
-BEGIN
-  -- contact being added to group
-  IF TG_OP = 'INSERT' THEN
-    -- is this a test contact
-    SELECT contacts_contact.is_test INTO STRICT is_test FROM contacts_contact WHERE id = NEW.contact_id;
+            DECLARE
+              is_test boolean;
+            BEGIN
+              -- Contact being added to group
+              IF TG_OP = 'INSERT' THEN
+                -- Find out if this is a test contact
+                SELECT contacts_contact.is_test INTO STRICT is_test FROM contacts_contact WHERE id=NEW.contact_id;
 
-    IF NOT is_test THEN
-      -- increment our group count
-      UPDATE contacts_contactgroup SET count = count + 1 WHERE id = NEW.contactgroup_id;
-    END IF;
+                -- If not
+                if not is_test THEN
+                  -- Increment our group count
+                  UPDATE contacts_contactgroup SET count=count+1 WHERE id=NEW.contactgroup_id;
+                END IF;
 
-  -- contact being removed from a group
-  ELSIF TG_OP = 'DELETE' THEN
-    -- is this a test contact
-    SELECT contacts_contact.is_test INTO STRICT is_test FROM contacts_contact WHERE id = OLD.contact_id;
+              -- Contact being removed from a group
+              ELSIF TG_OP = 'DELETE' THEN
+                -- Find out if this is a test contact
+                SELECT contacts_contact.is_test INTO STRICT is_test FROM contacts_contact WHERE id=OLD.contact_id;
 
-    IF NOT is_test THEN
-      -- decrement our group count
-      UPDATE contacts_contactgroup SET count = count - 1 WHERE id = OLD.contactgroup_id;
-    END IF;
+                -- If not
+                if not is_test THEN
+                  -- Decrement our group count
+                  UPDATE contacts_contactgroup SET count=count-1 WHERE id=OLD.contactgroup_id;
+                END IF;
 
-  -- table being cleared, reset all counts
-  ELSIF TG_OP = 'TRUNCATE' THEN
-    UPDATE contacts_contactgroup SET count = 0;
-  END IF;
+              -- Table being cleared, reset all counts
+              ELSIF TG_OP = 'TRUNCATE' THEN
+                UPDATE contacts_contactgroup SET count=0;
+              END IF;
 
-  RETURN NULL;
-END;
-$$;
+              RETURN NEW;
+            END;
+            $$;
 
 
 --
@@ -298,63 +123,56 @@ $$;
 CREATE FUNCTION update_label_count() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  is_visible BOOLEAN;
-BEGIN
-  -- label applied to message
-  IF TG_OP = 'INSERT' THEN
-    -- is this message visible
-    SELECT msgs_msg.visibility = 'V' INTO STRICT is_visible FROM msgs_msg WHERE msgs_msg.id = NEW.msg_id;
+            DECLARE
+              is_included boolean;
+            BEGIN
+              -- label applied to message
+              IF TG_TABLE_NAME = 'msgs_msg_labels' AND TG_OP = 'INSERT' THEN
+                -- is this message visible and non-test?
+                SELECT (msgs_msg.visibility = 'V' AND NOT contacts_contact.is_test) INTO STRICT is_included
+                FROM msgs_msg
+                INNER JOIN contacts_contact ON contacts_contact.id = msgs_msg.contact_id
+                WHERE msgs_msg.id = NEW.msg_id;
 
-    IF is_visible THEN
-      UPDATE msgs_label SET visible_count = visible_count + 1 WHERE id = NEW.label_id;
-    END IF;
+                IF is_included THEN
+                  UPDATE msgs_label SET visible_count = visible_count + 1 WHERE id=NEW.label_id;
+                END IF;
 
-  -- label removed from message
-  ELSIF TG_OP = 'DELETE' THEN
-    -- is this message visible
-    SELECT msgs_msg.visibility = 'V' INTO STRICT is_visible FROM msgs_msg WHERE msgs_msg.id = OLD.msg_id;
+              -- label removed from message
+              ELSIF TG_TABLE_NAME = 'msgs_msg_labels' AND TG_OP = 'DELETE' THEN
+                -- is this message visible and non-test?
+                SELECT (msgs_msg.visibility = 'V' AND NOT contacts_contact.is_test) INTO STRICT is_included
+                FROM msgs_msg
+                INNER JOIN contacts_contact ON contacts_contact.id = msgs_msg.contact_id
+                WHERE msgs_msg.id = OLD.msg_id;
 
-    IF is_visible THEN
-      UPDATE msgs_label SET visible_count = visible_count - 1 WHERE id = OLD.label_id;
-    END IF;
+                IF is_included THEN
+                  UPDATE msgs_label SET visible_count = visible_count - 1 WHERE id=OLD.label_id;
+                END IF;
 
-  -- no more labels for any messages
-  ELSIF TG_OP = 'TRUNCATE' THEN
-    UPDATE msgs_label SET visible_count = 0;
+              -- no more labels for any messages
+              ELSIF TG_TABLE_NAME = 'msgs_msg_labels' AND TG_OP = 'TRUNCATE' THEN
+                UPDATE msgs_label SET visible_count = 0;
 
-  END IF;
+              -- message visibility may have changed
+              ELSIF TG_TABLE_NAME = 'msgs_msg' AND TG_OP = 'UPDATE' THEN
+                -- is being archived (i.e. no longer included)
+                IF OLD.visibility = 'V' AND NEW.visibility = 'A' THEN
+                  UPDATE msgs_label SET visible_count = msgs_label.visible_count - 1
+                  FROM msgs_msg_labels
+                  WHERE msgs_msg_labels.label_id = msgs_label.id AND msgs_msg_labels.msg_id = NEW.id;
+                END IF;
+                -- is being restored (i.e. now included)
+                IF OLD.visibility = 'A' AND NEW.visibility = 'V' THEN
+                  UPDATE msgs_label SET visible_count = msgs_label.visible_count + 1
+                  FROM msgs_msg_labels
+                  WHERE msgs_msg_labels.label_id = msgs_label.id AND msgs_msg_labels.msg_id = NEW.id;
+                END IF;
+              END IF;
 
-  RETURN NULL;
-END;
-$$;
-
-
---
--- Name: update_msg_user_label_counts(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION update_msg_user_label_counts() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  -- is being archived (i.e. no longer included)
-  IF OLD.visibility = 'V' AND NEW.visibility = 'A' THEN
-    UPDATE msgs_label SET visible_count = visible_count - 1
-    FROM msgs_msg_labels
-    WHERE msgs_label.label_type = 'L' AND msgs_msg_labels.label_id = msgs_label.id AND msgs_msg_labels.msg_id = NEW.id;
-  END IF;
-
-  -- is being restored (i.e. now included)
-  IF OLD.visibility = 'A' AND NEW.visibility = 'V' THEN
-    UPDATE msgs_label SET visible_count = visible_count + 1
-    FROM msgs_msg_labels
-    WHERE msgs_label.label_type = 'L' AND msgs_msg_labels.label_id = msgs_label.id AND msgs_msg_labels.msg_id = NEW.id;
-  END IF;
-
-  RETURN NULL;
-END;
-$$;
+              RETURN NULL;
+            END;
+            $$;
 
 
 --
@@ -406,15 +224,19 @@ CREATE FUNCTION update_topup_used() RETURNS trigger
             $$;
 
 
+SET default_tablespace = '';
+
+SET default_with_oids = false;
+
 --
 -- Name: api_apitoken; Type: TABLE; Schema: public; Owner: -; Tablespace: 
 --
 
 CREATE TABLE api_apitoken (
     key character varying(40) NOT NULL,
-    user_id integer NOT NULL,
+    created timestamp with time zone NOT NULL,
     org_id integer NOT NULL,
-    created timestamp with time zone NOT NULL
+    user_id integer NOT NULL
 );
 
 
@@ -425,18 +247,18 @@ CREATE TABLE api_apitoken (
 CREATE TABLE api_webhookevent (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     status character varying(1) NOT NULL,
-    channel_id integer,
     event character varying(16) NOT NULL,
     data text NOT NULL,
     try_count integer NOT NULL,
-    org_id integer NOT NULL,
     next_attempt timestamp with time zone,
-    action character varying(8) NOT NULL
+    action character varying(8) NOT NULL,
+    channel_id integer,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -466,16 +288,17 @@ ALTER SEQUENCE api_webhookevent_id_seq OWNED BY api_webhookevent.id;
 CREATE TABLE api_webhookresult (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    event_id integer NOT NULL,
+    url text,
+    data text,
     status_code integer NOT NULL,
     message character varying(255) NOT NULL,
     body text,
-    url text,
-    data text
+    created_by_id integer NOT NULL,
+    event_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    request text
 );
 
 
@@ -597,10 +420,10 @@ CREATE TABLE auth_user (
     password character varying(128) NOT NULL,
     last_login timestamp with time zone NOT NULL,
     is_superuser boolean NOT NULL,
-    username character varying(254) NOT NULL,
+    username character varying(30) NOT NULL,
     first_name character varying(30) NOT NULL,
     last_name character varying(30) NOT NULL,
-    email character varying(254) NOT NULL,
+    email character varying(75) NOT NULL,
     is_staff boolean NOT NULL,
     is_active boolean NOT NULL,
     date_joined timestamp with time zone NOT NULL
@@ -692,8 +515,8 @@ ALTER SEQUENCE auth_user_user_permissions_id_seq OWNED BY auth_user_user_permiss
 
 CREATE TABLE authtoken_token (
     key character varying(40) NOT NULL,
-    user_id integer NOT NULL,
-    created timestamp with time zone NOT NULL
+    created timestamp with time zone NOT NULL,
+    user_id integer NOT NULL
 );
 
 
@@ -704,13 +527,13 @@ CREATE TABLE authtoken_token (
 CREATE TABLE campaigns_campaign (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(255) NOT NULL,
-    group_id integer NOT NULL,
     is_archived boolean NOT NULL,
+    created_by_id integer NOT NULL,
+    group_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     org_id integer NOT NULL,
     uuid character varying(36) NOT NULL
 );
@@ -742,18 +565,18 @@ ALTER SEQUENCE campaigns_campaign_id_seq OWNED BY campaigns_campaign.id;
 CREATE TABLE campaigns_campaignevent (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    campaign_id integer NOT NULL,
     "offset" integer NOT NULL,
-    relative_to_id integer NOT NULL,
-    flow_id integer NOT NULL,
+    unit character varying(1) NOT NULL,
     event_type character varying(1) NOT NULL,
     message text,
-    unit character varying(1) NOT NULL,
     delivery_hour integer NOT NULL,
+    campaign_id integer NOT NULL,
+    created_by_id integer NOT NULL,
+    flow_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    relative_to_id integer NOT NULL,
     uuid character varying(36) NOT NULL
 );
 
@@ -783,10 +606,10 @@ ALTER SEQUENCE campaigns_campaignevent_id_seq OWNED BY campaigns_campaignevent.i
 
 CREATE TABLE campaigns_eventfire (
     id integer NOT NULL,
-    event_id integer NOT NULL,
-    contact_id integer NOT NULL,
     scheduled timestamp with time zone NOT NULL,
-    fired timestamp with time zone
+    fired timestamp with time zone,
+    contact_id integer NOT NULL,
+    event_id integer NOT NULL
 );
 
 
@@ -883,15 +706,15 @@ ALTER SEQUENCE celery_tasksetmeta_id_seq OWNED BY celery_tasksetmeta.id;
 CREATE TABLE channels_alert (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    sync_event_id integer,
     alert_type character varying(1) NOT NULL,
     ended_on timestamp with time zone,
+    host character varying(32) NOT NULL,
     channel_id integer NOT NULL,
-    host character varying(32) NOT NULL
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    sync_event_id integer
 );
 
 
@@ -921,25 +744,25 @@ ALTER SEQUENCE channels_alert_id_seq OWNED BY channels_alert.id;
 CREATE TABLE channels_channel (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
+    channel_type character varying(3) NOT NULL,
     name character varying(64),
-    address character varying(255),
-    org_id integer,
+    address character varying(16),
+    country character varying(2),
     gcm_id character varying(255),
+    uuid character varying(36),
+    claim_code character varying(16),
     secret character varying(64),
     last_seen timestamp with time zone NOT NULL,
-    claim_code character varying(16),
-    country character varying(2),
-    alert_email character varying(75),
-    uuid character varying(36),
     device character varying(255),
     os character varying(255),
-    channel_type character varying(3) NOT NULL,
+    alert_email character varying(75),
     config text,
     role character varying(4) NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer,
     parent_id integer,
     bod text
 );
@@ -970,15 +793,15 @@ ALTER SEQUENCE channels_channel_id_seq OWNED BY channels_channel.id;
 
 CREATE TABLE channels_channellog (
     id integer NOT NULL,
-    msg_id integer NOT NULL,
     description character varying(255) NOT NULL,
+    is_error boolean NOT NULL,
     url text,
     method character varying(16),
     request text,
     response text,
     response_status integer,
     created_on timestamp with time zone NOT NULL,
-    is_error boolean NOT NULL
+    msg_id integer NOT NULL
 );
 
 
@@ -1008,20 +831,20 @@ ALTER SEQUENCE channels_channellog_id_seq OWNED BY channels_channellog.id;
 CREATE TABLE channels_syncevent (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    channel_id integer NOT NULL,
     power_source character varying(64) NOT NULL,
+    power_status character varying(64) NOT NULL,
     power_level integer NOT NULL,
     network_type character varying(128) NOT NULL,
-    power_status character varying(64) NOT NULL,
     lifetime integer,
     pending_message_count integer NOT NULL,
     retry_message_count integer NOT NULL,
     incoming_command_count integer NOT NULL,
-    outgoing_command_count integer NOT NULL
+    outgoing_command_count integer NOT NULL,
+    channel_id integer NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL
 );
 
 
@@ -1042,6 +865,27 @@ CREATE SEQUENCE channels_syncevent_id_seq
 --
 
 ALTER SEQUENCE channels_syncevent_id_seq OWNED BY channels_syncevent.id;
+
+
+--
+-- Name: contacts_contact; Type: TABLE; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE TABLE contacts_contact (
+    id integer NOT NULL,
+    is_active boolean NOT NULL,
+    created_on timestamp with time zone NOT NULL,
+    modified_on timestamp with time zone NOT NULL,
+    name character varying(128),
+    uuid character varying(36) NOT NULL,
+    is_blocked boolean NOT NULL,
+    is_test boolean NOT NULL,
+    language character varying(3),
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
+    is_failed boolean NOT NULL
+);
 
 
 --
@@ -1069,12 +913,12 @@ ALTER SEQUENCE contacts_contact_id_seq OWNED BY contacts_contact.id;
 
 CREATE TABLE contacts_contactfield (
     id integer NOT NULL,
-    org_id integer NOT NULL,
     label character varying(36) NOT NULL,
     key character varying(36) NOT NULL,
     is_active boolean NOT NULL,
+    value_type character varying(1) NOT NULL,
     show_in_table boolean NOT NULL,
-    value_type character varying(1) NOT NULL
+    org_id integer NOT NULL
 );
 
 
@@ -1104,14 +948,14 @@ ALTER SEQUENCE contacts_contactfield_id_seq OWNED BY contacts_contactfield.id;
 CREATE TABLE contacts_contactgroup (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(64) NOT NULL,
-    org_id integer NOT NULL,
-    import_task_id integer,
     query text,
+    created_by_id integer NOT NULL,
+    import_task_id integer,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
     uuid character varying(36) NOT NULL,
     count integer NOT NULL,
     group_type character varying(1) NOT NULL
@@ -1203,13 +1047,13 @@ ALTER SEQUENCE contacts_contactgroup_query_fields_id_seq OWNED BY contacts_conta
 
 CREATE TABLE contacts_contacturn (
     id integer NOT NULL,
-    contact_id integer,
     urn character varying(255) NOT NULL,
-    scheme character varying(128) NOT NULL,
-    org_id integer NOT NULL,
-    priority integer NOT NULL,
     path character varying(255) NOT NULL,
-    channel_id integer
+    scheme character varying(128) NOT NULL,
+    priority integer NOT NULL,
+    channel_id integer,
+    contact_id integer,
+    org_id integer NOT NULL
 );
 
 
@@ -1239,14 +1083,14 @@ ALTER SEQUENCE contacts_contacturn_id_seq OWNED BY contacts_contacturn.id;
 CREATE TABLE contacts_exportcontactstask (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
-    group_id integer,
     host character varying(32) NOT NULL,
-    task_id character varying(64)
+    task_id character varying(64),
+    created_by_id integer NOT NULL,
+    group_id integer,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -1282,10 +1126,10 @@ CREATE TABLE csv_imports_importtask (
     modified_on timestamp with time zone NOT NULL,
     csv_file character varying(100) NOT NULL,
     model_class character varying(255) NOT NULL,
-    import_log text NOT NULL,
-    task_id character varying(64),
     import_params text,
-    import_results text
+    import_log text NOT NULL,
+    import_results text,
+    task_id character varying(64)
 );
 
 
@@ -1306,145 +1150,6 @@ CREATE SEQUENCE csv_imports_importtask_id_seq
 --
 
 ALTER SEQUENCE csv_imports_importtask_id_seq OWNED BY csv_imports_importtask.id;
-
-
---
--- Name: dashboard_pagerank; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE dashboard_pagerank (
-    id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    website_id integer NOT NULL,
-    rank integer NOT NULL
-);
-
-
---
--- Name: dashboard_pagerank_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE dashboard_pagerank_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: dashboard_pagerank_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE dashboard_pagerank_id_seq OWNED BY dashboard_pagerank.id;
-
-
---
--- Name: dashboard_search; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE dashboard_search (
-    id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    query character varying(256) NOT NULL
-);
-
-
---
--- Name: dashboard_search_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE dashboard_search_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: dashboard_search_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE dashboard_search_id_seq OWNED BY dashboard_search.id;
-
-
---
--- Name: dashboard_searchposition; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE dashboard_searchposition (
-    id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    website_id integer NOT NULL,
-    search_id integer NOT NULL,
-    "position" integer NOT NULL
-);
-
-
---
--- Name: dashboard_searchposition_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE dashboard_searchposition_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: dashboard_searchposition_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE dashboard_searchposition_id_seq OWNED BY dashboard_searchposition.id;
-
-
---
--- Name: dashboard_website; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE dashboard_website (
-    id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    domain character varying(256) NOT NULL
-);
-
-
---
--- Name: dashboard_website_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE dashboard_website_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: dashboard_website_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE dashboard_website_id_seq OWNED BY dashboard_website.id;
 
 
 --
@@ -1507,37 +1212,6 @@ CREATE SEQUENCE django_migrations_id_seq
 --
 
 ALTER SEQUENCE django_migrations_id_seq OWNED BY django_migrations.id;
-
-
---
--- Name: django_select2_keymap; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE django_select2_keymap (
-    id integer NOT NULL,
-    key character varying(40) NOT NULL,
-    value character varying(100) NOT NULL,
-    accessed_on timestamp with time zone NOT NULL
-);
-
-
---
--- Name: django_select2_keymap_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE django_select2_keymap_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: django_select2_keymap_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE django_select2_keymap_id_seq OWNED BY django_select2_keymap.id;
 
 
 --
@@ -1776,9 +1450,9 @@ ALTER SEQUENCE djcelery_workerstate_id_seq OWNED BY djcelery_workerstate.id;
 
 CREATE TABLE flows_actionlog (
     id integer NOT NULL,
-    run_id integer NOT NULL,
     text text NOT NULL,
-    created_on timestamp with time zone NOT NULL
+    created_on timestamp with time zone NOT NULL,
+    run_id integer NOT NULL
 );
 
 
@@ -1808,12 +1482,12 @@ ALTER SEQUENCE flows_actionlog_id_seq OWNED BY flows_actionlog.id;
 CREATE TABLE flows_actionset (
     id integer NOT NULL,
     uuid character varying(36) NOT NULL,
-    flow_id integer NOT NULL,
     actions text NOT NULL,
     x integer NOT NULL,
     y integer NOT NULL,
-    created_on timestamp with time zone DEFAULT '2013-06-28 00:00:00'::timestamp without time zone NOT NULL,
-    modified_on timestamp with time zone DEFAULT '2013-06-28 00:00:00'::timestamp without time zone NOT NULL,
+    created_on timestamp with time zone NOT NULL,
+    modified_on timestamp with time zone NOT NULL,
+    flow_id integer NOT NULL,
     destination character varying(36),
     destination_type character varying(1)
 );
@@ -1845,12 +1519,12 @@ ALTER SEQUENCE flows_actionset_id_seq OWNED BY flows_actionset.id;
 CREATE TABLE flows_exportflowresultstask (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    task_id character varying(64),
     host character varying(32) NOT NULL,
+    task_id character varying(64),
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     org_id integer NOT NULL
 );
 
@@ -1911,22 +1585,22 @@ ALTER SEQUENCE flows_exportflowresultstask_id_seq OWNED BY flows_exportflowresul
 CREATE TABLE flows_flow (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(64) NOT NULL,
-    org_id integer NOT NULL,
+    entry_uuid character varying(36),
+    entry_type character varying(1),
     is_archived boolean NOT NULL,
     flow_type character varying(1) NOT NULL,
     metadata text,
-    entry_uuid character varying(36),
-    entry_type character varying(1),
     expires_after_minutes integer NOT NULL,
     ignore_triggers boolean NOT NULL,
     saved_on timestamp with time zone NOT NULL,
-    saved_by_id integer NOT NULL,
     base_language character varying(3),
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
+    saved_by_id integer NOT NULL,
     uuid character varying(36) NOT NULL
 );
 
@@ -1987,8 +1661,8 @@ ALTER SEQUENCE flows_flow_labels_id_seq OWNED BY flows_flow_labels.id;
 CREATE TABLE flows_flowlabel (
     id integer NOT NULL,
     name character varying(64) NOT NULL,
-    parent_id integer,
-    org_id integer NOT NULL
+    org_id integer NOT NULL,
+    parent_id integer
 );
 
 
@@ -2017,14 +1691,14 @@ ALTER SEQUENCE flows_flowlabel_id_seq OWNED BY flows_flowlabel.id;
 
 CREATE TABLE flows_flowrun (
     id integer NOT NULL,
-    flow_id integer NOT NULL,
-    contact_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
     is_active boolean NOT NULL,
     fields text,
+    created_on timestamp with time zone NOT NULL,
     expires_on timestamp with time zone,
     expired_on timestamp with time zone,
     call_id integer,
+    contact_id integer NOT NULL,
+    flow_id integer NOT NULL,
     start_id integer
 );
 
@@ -2055,14 +1729,14 @@ ALTER SEQUENCE flows_flowrun_id_seq OWNED BY flows_flowrun.id;
 CREATE TABLE flows_flowstart (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    flow_id integer NOT NULL,
     restart_participants boolean NOT NULL,
+    contact_count integer NOT NULL,
     status character varying(1) NOT NULL,
-    contact_count integer NOT NULL
+    created_by_id integer NOT NULL,
+    flow_id integer NOT NULL,
+    modified_by_id integer NOT NULL
 );
 
 
@@ -2153,15 +1827,15 @@ CREATE TABLE flows_flowstep (
     id integer NOT NULL,
     step_type character varying(1) NOT NULL,
     step_uuid character varying(36) NOT NULL,
+    rule_uuid character varying(36),
+    rule_category character varying(36),
+    rule_value character varying(640),
+    rule_decimal_value numeric(36,8),
+    next_uuid character varying(36),
     arrived_on timestamp with time zone NOT NULL,
     left_on timestamp with time zone,
-    rule_uuid character varying(36),
-    next_uuid character varying(36),
-    rule_category character varying(36),
-    rule_decimal_value numeric(36,8),
-    run_id integer DEFAULT 1 NOT NULL,
-    rule_value character varying(640),
-    contact_id integer NOT NULL
+    contact_id integer NOT NULL,
+    run_id integer NOT NULL
 );
 
 
@@ -2221,12 +1895,12 @@ ALTER SEQUENCE flows_flowstep_messages_id_seq OWNED BY flows_flowstep_messages.i
 CREATE TABLE flows_flowversion (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
+    definition text NOT NULL,
+    created_by_id integer NOT NULL,
     flow_id integer NOT NULL,
-    definition text NOT NULL
+    modified_by_id integer NOT NULL
 );
 
 
@@ -2256,19 +1930,19 @@ ALTER SEQUENCE flows_flowversion_id_seq OWNED BY flows_flowversion.id;
 CREATE TABLE flows_ruleset (
     id integer NOT NULL,
     uuid character varying(36) NOT NULL,
-    flow_id integer NOT NULL,
     label character varying(64),
-    rules text NOT NULL,
-    x integer NOT NULL,
-    y integer NOT NULL,
-    created_on timestamp with time zone DEFAULT '2013-06-28 00:00:00'::timestamp without time zone NOT NULL,
-    modified_on timestamp with time zone DEFAULT '2013-06-28 00:00:00'::timestamp without time zone NOT NULL,
     operand character varying(128),
     webhook_url character varying(255),
     webhook_action character varying(8),
+    rules text NOT NULL,
     finished_key character varying(1),
     value_type character varying(1) NOT NULL,
-    response_type character varying(1) NOT NULL
+    response_type character varying(1) NOT NULL,
+    x integer NOT NULL,
+    y integer NOT NULL,
+    created_on timestamp with time zone NOT NULL,
+    modified_on timestamp with time zone NOT NULL,
+    flow_id integer NOT NULL
 );
 
 
@@ -2299,8 +1973,8 @@ CREATE TABLE guardian_groupobjectpermission (
     id integer NOT NULL,
     permission_id integer NOT NULL,
     content_type_id integer NOT NULL,
-    group_id integer NOT NULL,
-    object_pk character varying(255) NOT NULL
+    object_pk character varying(255) NOT NULL,
+    group_id integer NOT NULL
 );
 
 
@@ -2331,8 +2005,8 @@ CREATE TABLE guardian_userobjectpermission (
     id integer NOT NULL,
     permission_id integer NOT NULL,
     content_type_id integer NOT NULL,
-    user_id integer NOT NULL,
-    object_pk character varying(255) NOT NULL
+    object_pk character varying(255) NOT NULL,
+    user_id integer NOT NULL
 );
 
 
@@ -2362,21 +2036,21 @@ ALTER SEQUENCE guardian_userobjectpermission_id_seq OWNED BY guardian_userobject
 CREATE TABLE ivr_ivrcall (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     external_id character varying(255) NOT NULL,
     status character varying(1) NOT NULL,
-    channel_id integer NOT NULL,
-    contact_id integer NOT NULL,
     direction character varying(1) NOT NULL,
-    flow_id integer,
     started_on timestamp with time zone,
     ended_on timestamp with time zone,
-    org_id integer NOT NULL,
     call_type character varying(1) NOT NULL,
     duration integer,
+    channel_id integer NOT NULL,
+    contact_id integer NOT NULL,
+    created_by_id integer NOT NULL,
+    flow_id integer,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
     contact_urn_id integer NOT NULL
 );
 
@@ -2441,12 +2115,12 @@ ALTER SEQUENCE locations_adminboundary_id_seq OWNED BY locations_adminboundary.i
 CREATE TABLE locations_boundaryalias (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(128) NOT NULL,
     boundary_id integer NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     org_id integer NOT NULL
 );
 
@@ -2476,18 +2150,18 @@ ALTER SEQUENCE locations_boundaryalias_id_seq OWNED BY locations_boundaryalias.i
 
 CREATE TABLE msgs_broadcast (
     id integer NOT NULL,
-    is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
+    recipient_count integer,
     text text NOT NULL,
     status character varying(1) NOT NULL,
-    org_id integer NOT NULL,
-    schedule_id integer,
-    parent_id integer,
     language_dict text,
-    recipient_count integer,
+    is_active boolean NOT NULL,
+    created_on timestamp with time zone NOT NULL,
+    modified_on timestamp with time zone NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
+    parent_id integer,
+    schedule_id integer,
     channel_id integer
 );
 
@@ -2608,15 +2282,15 @@ ALTER SEQUENCE msgs_broadcast_urns_id_seq OWNED BY msgs_broadcast_urns.id;
 CREATE TABLE msgs_call (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    channel_id integer,
-    contact_id integer NOT NULL,
     "time" timestamp with time zone NOT NULL,
     duration integer NOT NULL,
     call_type character varying(16) NOT NULL,
+    channel_id integer,
+    contact_id integer NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     org_id integer NOT NULL
 );
 
@@ -2647,16 +2321,16 @@ ALTER SEQUENCE msgs_call_id_seq OWNED BY msgs_call.id;
 CREATE TABLE msgs_exportmessagestask (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
     start_date date,
     end_date date,
     host character varying(32) NOT NULL,
     task_id character varying(64),
-    label_id integer
+    created_by_id integer NOT NULL,
+    label_id integer,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -2755,28 +2429,28 @@ ALTER SEQUENCE msgs_label_id_seq OWNED BY msgs_label.id;
 
 CREATE TABLE msgs_msg (
     id integer NOT NULL,
-    channel_id integer,
-    contact_id integer NOT NULL,
-    broadcast_id integer,
     text text NOT NULL,
-    direction character varying(1) NOT NULL,
-    status character varying(1) NOT NULL,
-    response_to_id integer,
-    org_id integer NOT NULL,
+    priority integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
     sent_on timestamp with time zone,
     delivered_on timestamp with time zone,
+    queued_on timestamp with time zone,
+    direction character varying(1) NOT NULL,
+    status character varying(1) NOT NULL,
+    visibility character varying(1) NOT NULL,
     has_template_error boolean NOT NULL,
     msg_type character varying(1),
     msg_count integer NOT NULL,
-    external_id character varying(255),
     error_count integer NOT NULL,
     next_attempt timestamp with time zone NOT NULL,
-    visibility character varying(1) NOT NULL,
-    topup_id integer,
-    queued_on timestamp with time zone,
-    priority integer NOT NULL,
+    external_id character varying(255),
+    broadcast_id integer,
+    channel_id integer,
+    contact_id integer NOT NULL,
     contact_urn_id integer NOT NULL,
+    org_id integer NOT NULL,
+    response_to_id integer,
+    topup_id integer,
     recording_url character varying(255)
 );
 
@@ -2837,12 +2511,12 @@ ALTER SEQUENCE msgs_msg_labels_id_seq OWNED BY msgs_msg_labels.id;
 CREATE TABLE orgs_creditalert (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
-    threshold integer NOT NULL
+    threshold integer NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -2872,15 +2546,15 @@ ALTER SEQUENCE orgs_creditalert_id_seq OWNED BY orgs_creditalert.id;
 CREATE TABLE orgs_invitation (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
     email character varying(75) NOT NULL,
     secret character varying(64) NOT NULL,
+    host character varying(32) NOT NULL,
     user_group character varying(1) NOT NULL,
-    host character varying(32) NOT NULL
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -2910,12 +2584,12 @@ ALTER SEQUENCE orgs_invitation_id_seq OWNED BY orgs_invitation.id;
 CREATE TABLE orgs_language (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(128) NOT NULL,
     iso_code character varying(4) NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     org_id integer NOT NULL
 );
 
@@ -2946,25 +2620,25 @@ ALTER SEQUENCE orgs_language_id_seq OWNED BY orgs_language.id;
 CREATE TABLE orgs_org (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(128) NOT NULL,
-    msg_last_viewed timestamp with time zone NOT NULL,
-    webhook character varying(255),
-    webhook_events integer NOT NULL,
     plan character varying(16) NOT NULL,
     plan_start timestamp with time zone NOT NULL,
     stripe_customer character varying(32),
-    timezone character varying(64) DEFAULT 'Africa/Kigali'::character varying NOT NULL,
-    flows_last_viewed timestamp with time zone NOT NULL,
     language character varying(64),
+    timezone character varying(64) NOT NULL,
     date_format character varying(1) NOT NULL,
+    webhook text,
+    webhook_events integer NOT NULL,
+    msg_last_viewed timestamp with time zone NOT NULL,
+    flows_last_viewed timestamp with time zone NOT NULL,
     config text,
     slug character varying(255),
     is_anon boolean NOT NULL,
     country_id integer,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
     primary_language_id integer
 );
 
@@ -3085,16 +2759,16 @@ ALTER SEQUENCE orgs_org_viewers_id_seq OWNED BY orgs_org_viewers.id;
 CREATE TABLE orgs_topup (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
     price integer NOT NULL,
     credits integer NOT NULL,
     expires_on timestamp with time zone NOT NULL,
     stripe_charge character varying(32),
     comment character varying(255),
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
     used integer NOT NULL
 );
 
@@ -3124,9 +2798,9 @@ ALTER SEQUENCE orgs_topup_id_seq OWNED BY orgs_topup.id;
 
 CREATE TABLE orgs_usersettings (
     id integer NOT NULL,
-    user_id integer NOT NULL,
     language character varying(8) NOT NULL,
-    tel character varying(16)
+    tel character varying(16),
+    user_id integer NOT NULL
 );
 
 
@@ -3156,11 +2830,11 @@ ALTER SEQUENCE orgs_usersettings_id_seq OWNED BY orgs_usersettings.id;
 CREATE TABLE public_lead (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    email character varying(75) NOT NULL
+    email character varying(75) NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL
 );
 
 
@@ -3190,15 +2864,15 @@ ALTER SEQUENCE public_lead_id_seq OWNED BY public_lead.id;
 CREATE TABLE public_video (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     name character varying(255) NOT NULL,
     summary text NOT NULL,
     description text NOT NULL,
     vimeo_id character varying(255) NOT NULL,
-    "order" integer NOT NULL
+    "order" integer NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL
 );
 
 
@@ -3228,15 +2902,15 @@ ALTER SEQUENCE public_video_id_seq OWNED BY public_video.id;
 CREATE TABLE reports_report (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     title character varying(64) NOT NULL,
     description text NOT NULL,
-    org_id integer NOT NULL,
     config text,
-    is_published boolean NOT NULL
+    is_published boolean NOT NULL,
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL
 );
 
 
@@ -3266,17 +2940,17 @@ ALTER SEQUENCE reports_report_id_seq OWNED BY reports_report.id;
 CREATE TABLE schedules_schedule (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
+    status character varying(1) NOT NULL,
+    repeat_hour_of_day integer,
+    repeat_day_of_month integer,
     repeat_period character varying(1),
     repeat_days integer,
     last_fire timestamp with time zone,
     next_fire timestamp with time zone,
-    repeat_day_of_month integer,
-    repeat_hour_of_day integer,
-    status character varying(1) NOT NULL
+    created_by_id integer NOT NULL,
+    modified_by_id integer NOT NULL
 );
 
 
@@ -3300,56 +2974,25 @@ ALTER SEQUENCE schedules_schedule_id_seq OWNED BY schedules_schedule.id;
 
 
 --
--- Name: south_migrationhistory; Type: TABLE; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE TABLE south_migrationhistory (
-    id integer NOT NULL,
-    app_name character varying(255) NOT NULL,
-    migration character varying(255) NOT NULL,
-    applied timestamp with time zone NOT NULL
-);
-
-
---
--- Name: south_migrationhistory_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE south_migrationhistory_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: south_migrationhistory_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE south_migrationhistory_id_seq OWNED BY south_migrationhistory.id;
-
-
---
 -- Name: triggers_trigger; Type: TABLE; Schema: public; Owner: -; Tablespace: 
 --
 
 CREATE TABLE triggers_trigger (
     id integer NOT NULL,
     is_active boolean NOT NULL,
-    created_by_id integer NOT NULL,
     created_on timestamp with time zone NOT NULL,
-    modified_by_id integer NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    org_id integer NOT NULL,
     keyword character varying(16),
-    flow_id integer,
     last_triggered timestamp with time zone,
     trigger_count integer NOT NULL,
     is_archived boolean NOT NULL,
-    schedule_id integer,
     trigger_type character varying(1) NOT NULL,
-    channel_id integer
+    channel_id integer,
+    created_by_id integer NOT NULL,
+    flow_id integer,
+    modified_by_id integer NOT NULL,
+    org_id integer NOT NULL,
+    schedule_id integer
 );
 
 
@@ -3530,20 +3173,20 @@ ALTER SEQUENCE users_recoverytoken_id_seq OWNED BY users_recoverytoken.id;
 
 CREATE TABLE values_value (
     id integer NOT NULL,
-    contact_id integer NOT NULL,
-    contact_field_id integer,
+    rule_uuid character varying(255),
+    category character varying(128),
     string_value text NOT NULL,
     decimal_value numeric(36,8),
     datetime_value timestamp with time zone,
-    org_id integer NOT NULL,
+    recording_value text,
     created_on timestamp with time zone NOT NULL,
     modified_on timestamp with time zone NOT NULL,
-    ruleset_id integer,
-    run_id integer,
-    rule_uuid character varying(255),
-    category character varying(128),
+    contact_id integer NOT NULL,
+    contact_field_id integer,
     location_value_id integer,
-    recording_value text
+    org_id integer NOT NULL,
+    ruleset_id integer,
+    run_id integer
 );
 
 
@@ -3745,34 +3388,6 @@ ALTER TABLE ONLY csv_imports_importtask ALTER COLUMN id SET DEFAULT nextval('csv
 -- Name: id; Type: DEFAULT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY dashboard_pagerank ALTER COLUMN id SET DEFAULT nextval('dashboard_pagerank_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_search ALTER COLUMN id SET DEFAULT nextval('dashboard_search_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_searchposition ALTER COLUMN id SET DEFAULT nextval('dashboard_searchposition_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_website ALTER COLUMN id SET DEFAULT nextval('dashboard_website_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY django_content_type ALTER COLUMN id SET DEFAULT nextval('django_content_type_id_seq'::regclass);
 
 
@@ -3781,13 +3396,6 @@ ALTER TABLE ONLY django_content_type ALTER COLUMN id SET DEFAULT nextval('django
 --
 
 ALTER TABLE ONLY django_migrations ALTER COLUMN id SET DEFAULT nextval('django_migrations_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY django_select2_keymap ALTER COLUMN id SET DEFAULT nextval('django_select2_keymap_id_seq'::regclass);
 
 
 --
@@ -4137,13 +3745,6 @@ ALTER TABLE ONLY schedules_schedule ALTER COLUMN id SET DEFAULT nextval('schedul
 -- Name: id; Type: DEFAULT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY south_migrationhistory ALTER COLUMN id SET DEFAULT nextval('south_migrationhistory_id_seq'::regclass);
-
-
---
--- Name: id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY triggers_trigger ALTER COLUMN id SET DEFAULT nextval('triggers_trigger_id_seq'::regclass);
 
 
@@ -4462,11 +4063,11 @@ ALTER TABLE ONLY contacts_contact
 
 
 --
--- Name: contacts_contact_uuid_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contact_uuid_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY contacts_contact
-    ADD CONSTRAINT contacts_contact_uuid_uniq UNIQUE (uuid);
+    ADD CONSTRAINT contacts_contact_uuid_key UNIQUE (uuid);
 
 
 --
@@ -4478,11 +4079,11 @@ ALTER TABLE ONLY contacts_contactfield
 
 
 --
--- Name: contacts_contactgroup_cont_contactgroup_id_1b08ad0e5aceab9_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_contacts_contactgroup_id_contact_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY contacts_contactgroup_contacts
-    ADD CONSTRAINT contacts_contactgroup_cont_contactgroup_id_1b08ad0e5aceab9_uniq UNIQUE (contactgroup_id, contact_id);
+    ADD CONSTRAINT contacts_contactgroup_contacts_contactgroup_id_contact_id_key UNIQUE (contactgroup_id, contact_id);
 
 
 --
@@ -4502,11 +4103,11 @@ ALTER TABLE ONLY contacts_contactgroup
 
 
 --
--- Name: contacts_contactgroup_que_contactgroup_id_1f961d508de63691_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_query_f_contactgroup_id_contactfield__key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY contacts_contactgroup_query_fields
-    ADD CONSTRAINT contacts_contactgroup_que_contactgroup_id_1f961d508de63691_uniq UNIQUE (contactgroup_id, contactfield_id);
+    ADD CONSTRAINT contacts_contactgroup_query_f_contactgroup_id_contactfield__key UNIQUE (contactgroup_id, contactfield_id);
 
 
 --
@@ -4526,19 +4127,19 @@ ALTER TABLE ONLY contacts_contactgroup
 
 
 --
--- Name: contacts_contacturn_org_id_53c1dd6b37975d80_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY contacts_contacturn
-    ADD CONSTRAINT contacts_contacturn_org_id_53c1dd6b37975d80_uniq UNIQUE (org_id, urn);
-
-
---
 -- Name: contacts_contacturn_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY contacts_contacturn
     ADD CONSTRAINT contacts_contacturn_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contacts_contacturn_urn_1dd7ac9b8ad903c2_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+--
+
+ALTER TABLE ONLY contacts_contacturn
+    ADD CONSTRAINT contacts_contacturn_urn_1dd7ac9b8ad903c2_uniq UNIQUE (urn, org_id);
 
 
 --
@@ -4558,43 +4159,11 @@ ALTER TABLE ONLY csv_imports_importtask
 
 
 --
--- Name: dashboard_pagerank_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY dashboard_pagerank
-    ADD CONSTRAINT dashboard_pagerank_pkey PRIMARY KEY (id);
-
-
---
--- Name: dashboard_search_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY dashboard_search
-    ADD CONSTRAINT dashboard_search_pkey PRIMARY KEY (id);
-
-
---
--- Name: dashboard_searchposition_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY dashboard_searchposition
-    ADD CONSTRAINT dashboard_searchposition_pkey PRIMARY KEY (id);
-
-
---
--- Name: dashboard_website_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY dashboard_website
-    ADD CONSTRAINT dashboard_website_pkey PRIMARY KEY (id);
-
-
---
--- Name: django_content_type_app_label_model_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: django_content_type_app_label_45f3b1d93ec8c61c_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY django_content_type
-    ADD CONSTRAINT django_content_type_app_label_model_key UNIQUE (app_label, model);
+    ADD CONSTRAINT django_content_type_app_label_45f3b1d93ec8c61c_uniq UNIQUE (app_label, model);
 
 
 --
@@ -4611,22 +4180,6 @@ ALTER TABLE ONLY django_content_type
 
 ALTER TABLE ONLY django_migrations
     ADD CONSTRAINT django_migrations_pkey PRIMARY KEY (id);
-
-
---
--- Name: django_select2_keymap_key_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY django_select2_keymap
-    ADD CONSTRAINT django_select2_keymap_key_key UNIQUE (key);
-
-
---
--- Name: django_select2_keymap_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY django_select2_keymap
-    ADD CONSTRAINT django_select2_keymap_pkey PRIMARY KEY (id);
 
 
 --
@@ -4742,11 +4295,11 @@ ALTER TABLE ONLY flows_actionset
 
 
 --
--- Name: flows_exportflow_exportflowresultstask_id_394f117d3bdbc9d8_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_exportflowresultstask_f_exportflowresultstask_id_flow_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_exportflowresultstask_flows
-    ADD CONSTRAINT flows_exportflow_exportflowresultstask_id_394f117d3bdbc9d8_uniq UNIQUE (exportflowresultstask_id, flow_id);
+    ADD CONSTRAINT flows_exportflowresultstask_f_exportflowresultstask_id_flow_key UNIQUE (exportflowresultstask_id, flow_id);
 
 
 --
@@ -4774,11 +4327,11 @@ ALTER TABLE ONLY flows_flow
 
 
 --
--- Name: flows_flow_labels_flow_id_72a0bc0c2420ba82_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_labels_flow_id_flowlabel_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_flow_labels
-    ADD CONSTRAINT flows_flow_labels_flow_id_72a0bc0c2420ba82_uniq UNIQUE (flow_id, flowlabel_id);
+    ADD CONSTRAINT flows_flow_labels_flow_id_flowlabel_id_key UNIQUE (flow_id, flowlabel_id);
 
 
 --
@@ -4806,11 +4359,11 @@ ALTER TABLE ONLY flows_flow
 
 
 --
--- Name: flows_flowlabel_name_4348fc61d5223f4e_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowlabel_name_25a18a8b44c6e978_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_flowlabel
-    ADD CONSTRAINT flows_flowlabel_name_4348fc61d5223f4e_uniq UNIQUE (name, parent_id, org_id);
+    ADD CONSTRAINT flows_flowlabel_name_25a18a8b44c6e978_uniq UNIQUE (name, parent_id, org_id);
 
 
 --
@@ -4830,11 +4383,11 @@ ALTER TABLE ONLY flows_flowrun
 
 
 --
--- Name: flows_flowstart_contacts_flowstart_id_3a4634bf8d96e52_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowstart_contacts_flowstart_id_contact_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_flowstart_contacts
-    ADD CONSTRAINT flows_flowstart_contacts_flowstart_id_3a4634bf8d96e52_uniq UNIQUE (flowstart_id, contact_id);
+    ADD CONSTRAINT flows_flowstart_contacts_flowstart_id_contact_id_key UNIQUE (flowstart_id, contact_id);
 
 
 --
@@ -4846,11 +4399,11 @@ ALTER TABLE ONLY flows_flowstart_contacts
 
 
 --
--- Name: flows_flowstart_groups_flowstart_id_73ad868c245b99b7_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowstart_groups_flowstart_id_contactgroup_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_flowstart_groups
-    ADD CONSTRAINT flows_flowstart_groups_flowstart_id_73ad868c245b99b7_uniq UNIQUE (flowstart_id, contactgroup_id);
+    ADD CONSTRAINT flows_flowstart_groups_flowstart_id_contactgroup_id_key UNIQUE (flowstart_id, contactgroup_id);
 
 
 --
@@ -4870,11 +4423,11 @@ ALTER TABLE ONLY flows_flowstart
 
 
 --
--- Name: flows_flowstep_messages_flowstep_id_1c16da1df33fadce_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowstep_messages_flowstep_id_msg_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY flows_flowstep_messages
-    ADD CONSTRAINT flows_flowstep_messages_flowstep_id_1c16da1df33fadce_uniq UNIQUE (flowstep_id, msg_id);
+    ADD CONSTRAINT flows_flowstep_messages_flowstep_id_msg_id_key UNIQUE (flowstep_id, msg_id);
 
 
 --
@@ -4918,11 +4471,11 @@ ALTER TABLE ONLY flows_ruleset
 
 
 --
--- Name: guardian_groupobjectpermission_object_pk_1496f467edd78b17_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: guardian_groupobjectpermissio_group_id_permission_id_object_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY guardian_groupobjectpermission
-    ADD CONSTRAINT guardian_groupobjectpermission_object_pk_1496f467edd78b17_uniq UNIQUE (object_pk, group_id, content_type_id, permission_id);
+    ADD CONSTRAINT guardian_groupobjectpermissio_group_id_permission_id_object_key UNIQUE (group_id, permission_id, object_pk);
 
 
 --
@@ -4934,19 +4487,19 @@ ALTER TABLE ONLY guardian_groupobjectpermission
 
 
 --
--- Name: guardian_userobjectpermission_object_pk_4a3e38372084f8ff_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY guardian_userobjectpermission
-    ADD CONSTRAINT guardian_userobjectpermission_object_pk_4a3e38372084f8ff_uniq UNIQUE (object_pk, user_id, content_type_id, permission_id);
-
-
---
 -- Name: guardian_userobjectpermission_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY guardian_userobjectpermission
     ADD CONSTRAINT guardian_userobjectpermission_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guardian_userobjectpermission_user_id_permission_id_object__key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+--
+
+ALTER TABLE ONLY guardian_userobjectpermission
+    ADD CONSTRAINT guardian_userobjectpermission_user_id_permission_id_object__key UNIQUE (user_id, permission_id, object_pk);
 
 
 --
@@ -4982,11 +4535,11 @@ ALTER TABLE ONLY locations_boundaryalias
 
 
 --
--- Name: msgs_broadcast_contacts_broadcast_id_51c4c2769b6492d2_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_contacts_broadcast_id_contact_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_broadcast_contacts
-    ADD CONSTRAINT msgs_broadcast_contacts_broadcast_id_51c4c2769b6492d2_uniq UNIQUE (broadcast_id, contact_id);
+    ADD CONSTRAINT msgs_broadcast_contacts_broadcast_id_contact_id_key UNIQUE (broadcast_id, contact_id);
 
 
 --
@@ -4998,11 +4551,11 @@ ALTER TABLE ONLY msgs_broadcast_contacts
 
 
 --
--- Name: msgs_broadcast_groups_broadcast_id_1983d7ef7345208b_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_groups_broadcast_id_contactgroup_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_broadcast_groups
-    ADD CONSTRAINT msgs_broadcast_groups_broadcast_id_1983d7ef7345208b_uniq UNIQUE (broadcast_id, contactgroup_id);
+    ADD CONSTRAINT msgs_broadcast_groups_broadcast_id_contactgroup_id_key UNIQUE (broadcast_id, contactgroup_id);
 
 
 --
@@ -5030,11 +4583,11 @@ ALTER TABLE ONLY msgs_broadcast
 
 
 --
--- Name: msgs_broadcast_urns_broadcast_id_2e61583b1ade1fc9_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_urns_broadcast_id_contacturn_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_broadcast_urns
-    ADD CONSTRAINT msgs_broadcast_urns_broadcast_id_2e61583b1ade1fc9_uniq UNIQUE (broadcast_id, contacturn_id);
+    ADD CONSTRAINT msgs_broadcast_urns_broadcast_id_contacturn_id_key UNIQUE (broadcast_id, contacturn_id);
 
 
 --
@@ -5054,27 +4607,27 @@ ALTER TABLE ONLY msgs_call
 
 
 --
--- Name: msgs_exportsmstask_groups_exportsmstask_id_44aae5323f00ae25_uni; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_exportmessagestask_group_exportmessagestask_id_contact_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_exportmessagestask_groups
-    ADD CONSTRAINT msgs_exportsmstask_groups_exportsmstask_id_44aae5323f00ae25_uni UNIQUE (exportmessagestask_id, contactgroup_id);
+    ADD CONSTRAINT msgs_exportmessagestask_group_exportmessagestask_id_contact_key UNIQUE (exportmessagestask_id, contactgroup_id);
 
 
 --
--- Name: msgs_exportsmstask_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_exportmessagestask_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_exportmessagestask_groups
-    ADD CONSTRAINT msgs_exportsmstask_groups_pkey PRIMARY KEY (id);
+    ADD CONSTRAINT msgs_exportmessagestask_groups_pkey PRIMARY KEY (id);
 
 
 --
--- Name: msgs_exportsmstask_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_exportmessagestask_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_exportmessagestask
-    ADD CONSTRAINT msgs_exportsmstask_pkey PRIMARY KEY (id);
+    ADD CONSTRAINT msgs_exportmessagestask_pkey PRIMARY KEY (id);
 
 
 --
@@ -5102,11 +4655,11 @@ ALTER TABLE ONLY msgs_label
 
 
 --
--- Name: msgs_msg_labels_msgs_id_33bef276d391b5f6_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_labels_msg_id_label_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY msgs_msg_labels
-    ADD CONSTRAINT msgs_msg_labels_msgs_id_33bef276d391b5f6_uniq UNIQUE (msg_id, label_id);
+    ADD CONSTRAINT msgs_msg_labels_msg_id_label_id_key UNIQUE (msg_id, label_id);
 
 
 --
@@ -5158,11 +4711,11 @@ ALTER TABLE ONLY orgs_language
 
 
 --
--- Name: orgs_org_administrators_org_id_6e45eb894eda5b26_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_administrators_org_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY orgs_org_administrators
-    ADD CONSTRAINT orgs_org_administrators_org_id_6e45eb894eda5b26_uniq UNIQUE (org_id, user_id);
+    ADD CONSTRAINT orgs_org_administrators_org_id_user_id_key UNIQUE (org_id, user_id);
 
 
 --
@@ -5174,11 +4727,11 @@ ALTER TABLE ONLY orgs_org_administrators
 
 
 --
--- Name: orgs_org_editors_org_id_6d6a49e762ecf991_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_editors_org_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY orgs_org_editors
-    ADD CONSTRAINT orgs_org_editors_org_id_6d6a49e762ecf991_uniq UNIQUE (org_id, user_id);
+    ADD CONSTRAINT orgs_org_editors_org_id_user_id_key UNIQUE (org_id, user_id);
 
 
 --
@@ -5206,11 +4759,11 @@ ALTER TABLE ONLY orgs_org
 
 
 --
--- Name: orgs_org_viewers_org_id_64e1939c6c378b34_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_viewers_org_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY orgs_org_viewers
-    ADD CONSTRAINT orgs_org_viewers_org_id_64e1939c6c378b34_uniq UNIQUE (org_id, user_id);
+    ADD CONSTRAINT orgs_org_viewers_org_id_user_id_key UNIQUE (org_id, user_id);
 
 
 --
@@ -5278,11 +4831,11 @@ ALTER TABLE ONLY schedules_schedule
 
 
 --
--- Name: south_migrationhistory_pkey; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_channel_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
-ALTER TABLE ONLY south_migrationhistory
-    ADD CONSTRAINT south_migrationhistory_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_trigger_channel_id_key UNIQUE (channel_id);
 
 
 --
@@ -5294,11 +4847,11 @@ ALTER TABLE ONLY triggers_trigger_contacts
 
 
 --
--- Name: triggers_trigger_contacts_trigger_id_758e8a27d88cec7f_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_contacts_trigger_id_contact_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY triggers_trigger_contacts
-    ADD CONSTRAINT triggers_trigger_contacts_trigger_id_758e8a27d88cec7f_uniq UNIQUE (trigger_id, contact_id);
+    ADD CONSTRAINT triggers_trigger_contacts_trigger_id_contact_id_key UNIQUE (trigger_id, contact_id);
 
 
 --
@@ -5310,11 +4863,11 @@ ALTER TABLE ONLY triggers_trigger_groups
 
 
 --
--- Name: triggers_trigger_groups_trigger_id_6737ca64e1c00276_uniq; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_groups_trigger_id_contactgroup_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
 --
 
 ALTER TABLE ONLY triggers_trigger_groups
-    ADD CONSTRAINT triggers_trigger_groups_trigger_id_6737ca64e1c00276_uniq UNIQUE (trigger_id, contactgroup_id);
+    ADD CONSTRAINT triggers_trigger_groups_trigger_id_contactgroup_id_key UNIQUE (trigger_id, contactgroup_id);
 
 
 --
@@ -5323,14 +4876,6 @@ ALTER TABLE ONLY triggers_trigger_groups
 
 ALTER TABLE ONLY triggers_trigger
     ADD CONSTRAINT triggers_trigger_pkey PRIMARY KEY (id);
-
-
---
--- Name: triggers_trigger_relayer_id_key; Type: CONSTRAINT; Schema: public; Owner: -; Tablespace: 
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT triggers_trigger_relayer_id_key UNIQUE (channel_id);
 
 
 --
@@ -5382,157 +4927,220 @@ ALTER TABLE ONLY values_value
 
 
 --
--- Name: api_apitoken_key_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_apitoken_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX api_apitoken_key_like ON api_apitoken USING btree (key varchar_pattern_ops);
-
-
---
--- Name: api_apitoken_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX api_apitoken_org_id ON api_apitoken USING btree (org_id);
+CREATE INDEX api_apitoken_9cf869aa ON api_apitoken USING btree (org_id);
 
 
 --
--- Name: api_apitoken_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_apitoken_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX api_apitoken_user_id ON api_apitoken USING btree (user_id);
-
-
---
--- Name: api_webhookevent_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX api_webhookevent_created_by_id ON api_webhookevent USING btree (created_by_id);
+CREATE INDEX api_apitoken_e8701ad4 ON api_apitoken USING btree (user_id);
 
 
 --
--- Name: api_webhookevent_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_apitoken_key_6326fe0e62af2891_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX api_webhookevent_modified_by_id ON api_webhookevent USING btree (modified_by_id);
-
-
---
--- Name: api_webhookevent_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX api_webhookevent_org_id ON api_webhookevent USING btree (org_id);
+CREATE INDEX api_apitoken_key_6326fe0e62af2891_like ON api_apitoken USING btree (key varchar_pattern_ops);
 
 
 --
--- Name: api_webhookevent_relayer_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookevent_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX api_webhookevent_relayer_id ON api_webhookevent USING btree (channel_id);
-
-
---
--- Name: api_webhookresult_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX api_webhookresult_created_by_id ON api_webhookresult USING btree (created_by_id);
+CREATE INDEX api_webhookevent_72eb6c85 ON api_webhookevent USING btree (channel_id);
 
 
 --
--- Name: api_webhookresult_event_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookevent_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX api_webhookresult_event_id ON api_webhookresult USING btree (event_id);
-
-
---
--- Name: api_webhookresult_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX api_webhookresult_modified_by_id ON api_webhookresult USING btree (modified_by_id);
+CREATE INDEX api_webhookevent_9cf869aa ON api_webhookevent USING btree (org_id);
 
 
 --
--- Name: authtoken_token_key_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookevent_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX authtoken_token_key_like ON authtoken_token USING btree (key varchar_pattern_ops);
-
-
---
--- Name: campaigns_campaign_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX campaigns_campaign_created_by_id ON campaigns_campaign USING btree (created_by_id);
+CREATE INDEX api_webhookevent_b3da0983 ON api_webhookevent USING btree (modified_by_id);
 
 
 --
--- Name: campaigns_campaign_group_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookevent_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_campaign_group_id ON campaigns_campaign USING btree (group_id);
-
-
---
--- Name: campaigns_campaign_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX campaigns_campaign_modified_by_id ON campaigns_campaign USING btree (modified_by_id);
+CREATE INDEX api_webhookevent_e93cb7eb ON api_webhookevent USING btree (created_by_id);
 
 
 --
--- Name: campaigns_campaign_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookresult_4437cfac; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_campaign_org_id ON campaigns_campaign USING btree (org_id);
-
-
---
--- Name: campaigns_campaignevent_campaign_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX campaigns_campaignevent_campaign_id ON campaigns_campaignevent USING btree (campaign_id);
+CREATE INDEX api_webhookresult_4437cfac ON api_webhookresult USING btree (event_id);
 
 
 --
--- Name: campaigns_campaignevent_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookresult_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_campaignevent_created_by_id ON campaigns_campaignevent USING btree (created_by_id);
-
-
---
--- Name: campaigns_campaignevent_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX campaigns_campaignevent_flow_id ON campaigns_campaignevent USING btree (flow_id);
+CREATE INDEX api_webhookresult_b3da0983 ON api_webhookresult USING btree (modified_by_id);
 
 
 --
--- Name: campaigns_campaignevent_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: api_webhookresult_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_campaignevent_modified_by_id ON campaigns_campaignevent USING btree (modified_by_id);
-
-
---
--- Name: campaigns_campaignevent_related_to_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX campaigns_campaignevent_related_to_id ON campaigns_campaignevent USING btree (relative_to_id);
+CREATE INDEX api_webhookresult_e93cb7eb ON api_webhookresult USING btree (created_by_id);
 
 
 --
--- Name: campaigns_eventfire_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: auth_group_name_253ae2a6331666e8_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_eventfire_contact_id ON campaigns_eventfire USING btree (contact_id);
+CREATE INDEX auth_group_name_253ae2a6331666e8_like ON auth_group USING btree (name varchar_pattern_ops);
 
 
 --
--- Name: campaigns_eventfire_event_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: auth_group_permissions_0e939a4f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX campaigns_eventfire_event_id ON campaigns_eventfire USING btree (event_id);
+CREATE INDEX auth_group_permissions_0e939a4f ON auth_group_permissions USING btree (group_id);
+
+
+--
+-- Name: auth_group_permissions_8373b171; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_group_permissions_8373b171 ON auth_group_permissions USING btree (permission_id);
+
+
+--
+-- Name: auth_permission_417f1b1c; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_permission_417f1b1c ON auth_permission USING btree (content_type_id);
+
+
+--
+-- Name: auth_user_groups_0e939a4f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_user_groups_0e939a4f ON auth_user_groups USING btree (group_id);
+
+
+--
+-- Name: auth_user_groups_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_user_groups_e8701ad4 ON auth_user_groups USING btree (user_id);
+
+
+--
+-- Name: auth_user_user_permissions_8373b171; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_user_user_permissions_8373b171 ON auth_user_user_permissions USING btree (permission_id);
+
+
+--
+-- Name: auth_user_user_permissions_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_user_user_permissions_e8701ad4 ON auth_user_user_permissions USING btree (user_id);
+
+
+--
+-- Name: auth_user_username_51b3b110094b8aae_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX auth_user_username_51b3b110094b8aae_like ON auth_user USING btree (username varchar_pattern_ops);
+
+
+--
+-- Name: authtoken_token_key_7222ec672cd32dcd_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX authtoken_token_key_7222ec672cd32dcd_like ON authtoken_token USING btree (key varchar_pattern_ops);
+
+
+--
+-- Name: campaigns_campaign_0e939a4f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaign_0e939a4f ON campaigns_campaign USING btree (group_id);
+
+
+--
+-- Name: campaigns_campaign_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaign_9cf869aa ON campaigns_campaign USING btree (org_id);
+
+
+--
+-- Name: campaigns_campaign_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaign_b3da0983 ON campaigns_campaign USING btree (modified_by_id);
+
+
+--
+-- Name: campaigns_campaign_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaign_e93cb7eb ON campaigns_campaign USING btree (created_by_id);
+
+
+--
+-- Name: campaigns_campaignevent_61d66954; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaignevent_61d66954 ON campaigns_campaignevent USING btree (relative_to_id);
+
+
+--
+-- Name: campaigns_campaignevent_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaignevent_7f26ac5b ON campaigns_campaignevent USING btree (flow_id);
+
+
+--
+-- Name: campaigns_campaignevent_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaignevent_b3da0983 ON campaigns_campaignevent USING btree (modified_by_id);
+
+
+--
+-- Name: campaigns_campaignevent_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaignevent_e93cb7eb ON campaigns_campaignevent USING btree (created_by_id);
+
+
+--
+-- Name: campaigns_campaignevent_f14acec3; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_campaignevent_f14acec3 ON campaigns_campaignevent USING btree (campaign_id);
+
+
+--
+-- Name: campaigns_eventfire_4437cfac; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_eventfire_4437cfac ON campaigns_eventfire USING btree (event_id);
+
+
+--
+-- Name: campaigns_eventfire_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX campaigns_eventfire_6d82f13d ON campaigns_eventfire USING btree (contact_id);
 
 
 --
@@ -5564,248 +5172,255 @@ CREATE INDEX celery_tasksetmeta_taskset_id_like ON celery_tasksetmeta USING btre
 
 
 --
--- Name: channels_alert_channel_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_alert_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_alert_channel_id ON channels_alert USING btree (channel_id);
+CREATE INDEX channels_alert_72eb6c85 ON channels_alert USING btree (channel_id);
 
 
 --
--- Name: channels_alert_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_alert_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_alert_created_by_id ON channels_alert USING btree (created_by_id);
+CREATE INDEX channels_alert_b3da0983 ON channels_alert USING btree (modified_by_id);
 
 
 --
--- Name: channels_alert_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_alert_c8730bec; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_alert_modified_by_id ON channels_alert USING btree (modified_by_id);
+CREATE INDEX channels_alert_c8730bec ON channels_alert USING btree (sync_event_id);
 
 
 --
--- Name: channels_alert_sync_event_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_alert_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_alert_sync_event_id ON channels_alert USING btree (sync_event_id);
+CREATE INDEX channels_alert_e93cb7eb ON channels_alert USING btree (created_by_id);
 
 
 --
--- Name: channels_channel_claim_code_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_6be37982; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_claim_code_like ON channels_channel USING btree (claim_code varchar_pattern_ops);
+CREATE INDEX channels_channel_6be37982 ON channels_channel USING btree (parent_id);
 
 
 --
--- Name: channels_channel_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_created_by_id ON channels_channel USING btree (created_by_id);
+CREATE INDEX channels_channel_9cf869aa ON channels_channel USING btree (org_id);
 
 
 --
--- Name: channels_channel_gcm_id_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_gcm_id_like ON channels_channel USING btree (gcm_id varchar_pattern_ops);
+CREATE INDEX channels_channel_b3da0983 ON channels_channel USING btree (modified_by_id);
 
 
 --
--- Name: channels_channel_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_claim_code_1d76c97784145fd7_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_modified_by_id ON channels_channel USING btree (modified_by_id);
+CREATE INDEX channels_channel_claim_code_1d76c97784145fd7_like ON channels_channel USING btree (claim_code varchar_pattern_ops);
 
 
 --
--- Name: channels_channel_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_org_id ON channels_channel USING btree (org_id);
+CREATE INDEX channels_channel_e93cb7eb ON channels_channel USING btree (created_by_id);
 
 
 --
--- Name: channels_channel_parent_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_ef7c876f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_parent_id ON channels_channel USING btree (parent_id);
+CREATE INDEX channels_channel_ef7c876f ON channels_channel USING btree (uuid);
 
 
 --
--- Name: channels_channel_secret_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_secret_301da0bd8988cfef_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_secret_like ON channels_channel USING btree (secret varchar_pattern_ops);
+CREATE INDEX channels_channel_secret_301da0bd8988cfef_like ON channels_channel USING btree (secret varchar_pattern_ops);
 
 
 --
--- Name: channels_channel_uuid; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channel_uuid_3f1c42234e8f4a30_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channel_uuid ON channels_channel USING btree (uuid);
+CREATE INDEX channels_channel_uuid_3f1c42234e8f4a30_like ON channels_channel USING btree (uuid varchar_pattern_ops);
 
 
 --
--- Name: channels_channellog_msgs_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_channellog_0cc31d7b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_channellog_msgs_id ON channels_channellog USING btree (msg_id);
+CREATE INDEX channels_channellog_0cc31d7b ON channels_channellog USING btree (msg_id);
 
 
 --
--- Name: channels_syncevent_channel_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_syncevent_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_syncevent_channel_id ON channels_syncevent USING btree (channel_id);
+CREATE INDEX channels_syncevent_72eb6c85 ON channels_syncevent USING btree (channel_id);
 
 
 --
--- Name: channels_syncevent_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_syncevent_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_syncevent_created_by_id ON channels_syncevent USING btree (created_by_id);
+CREATE INDEX channels_syncevent_b3da0983 ON channels_syncevent USING btree (modified_by_id);
 
 
 --
--- Name: channels_syncevent_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: channels_syncevent_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX channels_syncevent_modified_by_id ON channels_syncevent USING btree (modified_by_id);
+CREATE INDEX channels_syncevent_e93cb7eb ON channels_syncevent USING btree (created_by_id);
 
 
 --
--- Name: contacts_contact_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contact_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contact_created_by_id ON contacts_contact USING btree (created_by_id);
+CREATE INDEX contacts_contact_9cf869aa ON contacts_contact USING btree (org_id);
 
 
 --
--- Name: contacts_contact_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contact_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contact_modified_by_id ON contacts_contact USING btree (modified_by_id);
+CREATE INDEX contacts_contact_b3da0983 ON contacts_contact USING btree (modified_by_id);
 
 
 --
--- Name: contacts_contact_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contact_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contact_org_id ON contacts_contact USING btree (org_id);
+CREATE INDEX contacts_contact_e93cb7eb ON contacts_contact USING btree (created_by_id);
 
 
 --
--- Name: contacts_contactfield_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contact_uuid_1615f91d2f7b8c6_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactfield_org_id ON contacts_contactfield USING btree (org_id);
+CREATE INDEX contacts_contact_uuid_1615f91d2f7b8c6_like ON contacts_contact USING btree (uuid varchar_pattern_ops);
 
 
 --
--- Name: contacts_contactgroup_contacts_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactfield_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_contacts_contact_id ON contacts_contactgroup_contacts USING btree (contact_id);
+CREATE INDEX contacts_contactfield_9cf869aa ON contacts_contactfield USING btree (org_id);
 
 
 --
--- Name: contacts_contactgroup_contacts_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_905540a6; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_contacts_contactgroup_id ON contacts_contactgroup_contacts USING btree (contactgroup_id);
+CREATE INDEX contacts_contactgroup_905540a6 ON contacts_contactgroup USING btree (import_task_id);
 
 
 --
--- Name: contacts_contactgroup_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_created_by_id ON contacts_contactgroup USING btree (created_by_id);
+CREATE INDEX contacts_contactgroup_9cf869aa ON contacts_contactgroup USING btree (org_id);
 
 
 --
--- Name: contacts_contactgroup_import_task_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_import_task_id ON contacts_contactgroup USING btree (import_task_id);
+CREATE INDEX contacts_contactgroup_b3da0983 ON contacts_contactgroup USING btree (modified_by_id);
 
 
 --
--- Name: contacts_contactgroup_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_contacts_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_modified_by_id ON contacts_contactgroup USING btree (modified_by_id);
+CREATE INDEX contacts_contactgroup_contacts_0b1b2ae4 ON contacts_contactgroup_contacts USING btree (contactgroup_id);
 
 
 --
--- Name: contacts_contactgroup_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_contacts_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_org_id ON contacts_contactgroup USING btree (org_id);
+CREATE INDEX contacts_contactgroup_contacts_6d82f13d ON contacts_contactgroup_contacts USING btree (contact_id);
 
 
 --
--- Name: contacts_contactgroup_query_fields_contactfield_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_query_fields_contactfield_id ON contacts_contactgroup_query_fields USING btree (contactfield_id);
+CREATE INDEX contacts_contactgroup_e93cb7eb ON contacts_contactgroup USING btree (created_by_id);
 
 
 --
--- Name: contacts_contactgroup_query_fields_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_query_fields_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contactgroup_query_fields_contactgroup_id ON contacts_contactgroup_query_fields USING btree (contactgroup_id);
+CREATE INDEX contacts_contactgroup_query_fields_0b1b2ae4 ON contacts_contactgroup_query_fields USING btree (contactgroup_id);
 
 
 --
--- Name: contacts_contacturn_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contactgroup_query_fields_0d0cd403; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contacturn_contact_id ON contacts_contacturn USING btree (contact_id);
+CREATE INDEX contacts_contactgroup_query_fields_0d0cd403 ON contacts_contactgroup_query_fields USING btree (contactfield_id);
 
 
 --
--- Name: contacts_contacturn_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contacturn_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contacturn_org_id ON contacts_contacturn USING btree (org_id);
+CREATE INDEX contacts_contacturn_6d82f13d ON contacts_contacturn USING btree (contact_id);
 
 
 --
--- Name: contacts_contacturn_relayer_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contacturn_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_contacturn_relayer_id ON contacts_contacturn USING btree (channel_id);
+CREATE INDEX contacts_contacturn_72eb6c85 ON contacts_contacturn USING btree (channel_id);
 
 
 --
--- Name: contacts_exportcontactstask_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_contacturn_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_exportcontactstask_created_by_id ON contacts_exportcontactstask USING btree (created_by_id);
+CREATE INDEX contacts_contacturn_9cf869aa ON contacts_contacturn USING btree (org_id);
 
 
 --
--- Name: contacts_exportcontactstask_group_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_exportcontactstask_0e939a4f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_exportcontactstask_group_id ON contacts_exportcontactstask USING btree (group_id);
+CREATE INDEX contacts_exportcontactstask_0e939a4f ON contacts_exportcontactstask USING btree (group_id);
 
 
 --
--- Name: contacts_exportcontactstask_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_exportcontactstask_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_exportcontactstask_modified_by_id ON contacts_exportcontactstask USING btree (modified_by_id);
+CREATE INDEX contacts_exportcontactstask_9cf869aa ON contacts_exportcontactstask USING btree (org_id);
 
 
 --
--- Name: contacts_exportcontactstask_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: contacts_exportcontactstask_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX contacts_exportcontactstask_org_id ON contacts_exportcontactstask USING btree (org_id);
+CREATE INDEX contacts_exportcontactstask_b3da0983 ON contacts_exportcontactstask USING btree (modified_by_id);
+
+
+--
+-- Name: contacts_exportcontactstask_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX contacts_exportcontactstask_e93cb7eb ON contacts_exportcontactstask USING btree (created_by_id);
 
 
 --
@@ -5823,80 +5438,17 @@ CREATE INDEX csv_imports_importtask_modified_by_id ON csv_imports_importtask USI
 
 
 --
--- Name: dashboard_pagerank_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: django_session_de54fa62; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX dashboard_pagerank_created_by_id ON dashboard_pagerank USING btree (created_by_id);
-
-
---
--- Name: dashboard_pagerank_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_pagerank_modified_by_id ON dashboard_pagerank USING btree (modified_by_id);
+CREATE INDEX django_session_de54fa62 ON django_session USING btree (expire_date);
 
 
 --
--- Name: dashboard_pagerank_website_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: django_session_session_key_461cfeaa630ca218_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX dashboard_pagerank_website_id ON dashboard_pagerank USING btree (website_id);
-
-
---
--- Name: dashboard_search_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_search_created_by_id ON dashboard_search USING btree (created_by_id);
-
-
---
--- Name: dashboard_search_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_search_modified_by_id ON dashboard_search USING btree (modified_by_id);
-
-
---
--- Name: dashboard_searchposition_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_searchposition_created_by_id ON dashboard_searchposition USING btree (created_by_id);
-
-
---
--- Name: dashboard_searchposition_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_searchposition_modified_by_id ON dashboard_searchposition USING btree (modified_by_id);
-
-
---
--- Name: dashboard_searchposition_search_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_searchposition_search_id ON dashboard_searchposition USING btree (search_id);
-
-
---
--- Name: dashboard_searchposition_website_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_searchposition_website_id ON dashboard_searchposition USING btree (website_id);
-
-
---
--- Name: dashboard_website_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_website_created_by_id ON dashboard_website USING btree (created_by_id);
-
-
---
--- Name: dashboard_website_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX dashboard_website_modified_by_id ON dashboard_website USING btree (modified_by_id);
+CREATE INDEX django_session_session_key_461cfeaa630ca218_like ON django_session USING btree (session_key varchar_pattern_ops);
 
 
 --
@@ -5991,24 +5543,24 @@ CREATE INDEX djcelery_workerstate_last_heartbeat ON djcelery_workerstate USING b
 
 
 --
--- Name: flows_actionlog_run_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_actionlog_0acf093b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_actionlog_run_id ON flows_actionlog USING btree (run_id);
-
-
---
--- Name: flows_actionset_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_actionset_flow_id ON flows_actionset USING btree (flow_id);
+CREATE INDEX flows_actionlog_0acf093b ON flows_actionlog USING btree (run_id);
 
 
 --
--- Name: flows_actionset_uuid_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_actionset_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_actionset_uuid_like ON flows_actionset USING btree (uuid varchar_pattern_ops);
+CREATE INDEX flows_actionset_7f26ac5b ON flows_actionset USING btree (flow_id);
+
+
+--
+-- Name: flows_actionset_uuid_402f1978d948f21d_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_actionset_uuid_402f1978d948f21d_like ON flows_actionset USING btree (uuid varchar_pattern_ops);
 
 
 --
@@ -6019,206 +5571,213 @@ CREATE INDEX flows_exportflowresultstask_9cf869aa ON flows_exportflowresultstask
 
 
 --
--- Name: flows_exportflowresultstask_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_exportflowresultstask_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_exportflowresultstask_created_by_id ON flows_exportflowresultstask USING btree (created_by_id);
-
-
---
--- Name: flows_exportflowresultstask_flows_exportflowresultstask_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_exportflowresultstask_flows_exportflowresultstask_id ON flows_exportflowresultstask_flows USING btree (exportflowresultstask_id);
+CREATE INDEX flows_exportflowresultstask_b3da0983 ON flows_exportflowresultstask USING btree (modified_by_id);
 
 
 --
--- Name: flows_exportflowresultstask_flows_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_exportflowresultstask_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_exportflowresultstask_flows_flow_id ON flows_exportflowresultstask_flows USING btree (flow_id);
-
-
---
--- Name: flows_exportflowresultstask_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_exportflowresultstask_modified_by_id ON flows_exportflowresultstask USING btree (modified_by_id);
+CREATE INDEX flows_exportflowresultstask_e93cb7eb ON flows_exportflowresultstask USING btree (created_by_id);
 
 
 --
--- Name: flows_flow_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_exportflowresultstask_flows_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flow_created_by_id ON flows_flow USING btree (created_by_id);
-
-
---
--- Name: flows_flow_entry_uuid_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flow_entry_uuid_like ON flows_flow USING btree (entry_uuid varchar_pattern_ops);
+CREATE INDEX flows_exportflowresultstask_flows_7f26ac5b ON flows_exportflowresultstask_flows USING btree (flow_id);
 
 
 --
--- Name: flows_flow_labels_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_exportflowresultstask_flows_b21ac655; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flow_labels_flow_id ON flows_flow_labels USING btree (flow_id);
-
-
---
--- Name: flows_flow_labels_flowlabel_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flow_labels_flowlabel_id ON flows_flow_labels USING btree (flowlabel_id);
+CREATE INDEX flows_exportflowresultstask_flows_b21ac655 ON flows_exportflowresultstask_flows USING btree (exportflowresultstask_id);
 
 
 --
--- Name: flows_flow_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flow_modified_by_id ON flows_flow USING btree (modified_by_id);
-
-
---
--- Name: flows_flow_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flow_org_id ON flows_flow USING btree (org_id);
+CREATE INDEX flows_flow_9cf869aa ON flows_flow USING btree (org_id);
 
 
 --
--- Name: flows_flow_saved_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flow_saved_by_id ON flows_flow USING btree (saved_by_id);
-
-
---
--- Name: flows_flowlabel_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowlabel_org_id ON flows_flowlabel USING btree (org_id);
+CREATE INDEX flows_flow_b3da0983 ON flows_flow USING btree (modified_by_id);
 
 
 --
--- Name: flows_flowlabel_parent_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_bc7c970b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowlabel_parent_id ON flows_flowlabel USING btree (parent_id);
-
-
---
--- Name: flows_flowrun_call_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowrun_call_id ON flows_flowrun USING btree (call_id);
+CREATE INDEX flows_flow_bc7c970b ON flows_flow USING btree (saved_by_id);
 
 
 --
--- Name: flows_flowrun_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowrun_contact_id ON flows_flowrun USING btree (contact_id);
-
-
---
--- Name: flows_flowrun_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowrun_flow_id ON flows_flowrun USING btree (flow_id);
+CREATE INDEX flows_flow_e93cb7eb ON flows_flow USING btree (created_by_id);
 
 
 --
--- Name: flows_flowrun_start_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_entry_uuid_6db134a69882563d_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowrun_start_id ON flows_flowrun USING btree (start_id);
-
-
---
--- Name: flows_flowstart_contacts_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstart_contacts_contact_id ON flows_flowstart_contacts USING btree (contact_id);
+CREATE INDEX flows_flow_entry_uuid_6db134a69882563d_like ON flows_flow USING btree (entry_uuid varchar_pattern_ops);
 
 
 --
--- Name: flows_flowstart_contacts_flowstart_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_labels_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstart_contacts_flowstart_id ON flows_flowstart_contacts USING btree (flowstart_id);
-
-
---
--- Name: flows_flowstart_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstart_created_by_id ON flows_flowstart USING btree (created_by_id);
+CREATE INDEX flows_flow_labels_7f26ac5b ON flows_flow_labels USING btree (flow_id);
 
 
 --
--- Name: flows_flowstart_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flow_labels_da1e9929; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstart_flow_id ON flows_flowstart USING btree (flow_id);
-
-
---
--- Name: flows_flowstart_groups_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstart_groups_contactgroup_id ON flows_flowstart_groups USING btree (contactgroup_id);
+CREATE INDEX flows_flow_labels_da1e9929 ON flows_flow_labels USING btree (flowlabel_id);
 
 
 --
--- Name: flows_flowstart_groups_flowstart_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowlabel_6be37982; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstart_groups_flowstart_id ON flows_flowstart_groups USING btree (flowstart_id);
-
-
---
--- Name: flows_flowstart_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstart_modified_by_id ON flows_flowstart USING btree (modified_by_id);
+CREATE INDEX flows_flowlabel_6be37982 ON flows_flowlabel USING btree (parent_id);
 
 
 --
--- Name: flows_flowstep_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowlabel_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstep_contact_id ON flows_flowstep USING btree (contact_id);
-
-
---
--- Name: flows_flowstep_left_on; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstep_left_on ON flows_flowstep USING btree (left_on);
+CREATE INDEX flows_flowlabel_9cf869aa ON flows_flowlabel USING btree (org_id);
 
 
 --
--- Name: flows_flowstep_messages_flowstep_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowrun_324ac644; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstep_messages_flowstep_id ON flows_flowstep_messages USING btree (flowstep_id);
-
-
---
--- Name: flows_flowstep_messages_msgs_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstep_messages_msgs_id ON flows_flowstep_messages USING btree (msg_id);
+CREATE INDEX flows_flowrun_324ac644 ON flows_flowrun USING btree (start_id);
 
 
 --
--- Name: flows_flowstep_run_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowrun_5d26c52f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstep_run_id ON flows_flowstep USING btree (run_id);
+CREATE INDEX flows_flowrun_5d26c52f ON flows_flowrun USING btree (call_id);
+
+
+--
+-- Name: flows_flowrun_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowrun_6d82f13d ON flows_flowrun USING btree (contact_id);
+
+
+--
+-- Name: flows_flowrun_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowrun_7f26ac5b ON flows_flowrun USING btree (flow_id);
+
+
+--
+-- Name: flows_flowstart_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_7f26ac5b ON flows_flowstart USING btree (flow_id);
+
+
+--
+-- Name: flows_flowstart_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_b3da0983 ON flows_flowstart USING btree (modified_by_id);
+
+
+--
+-- Name: flows_flowstart_contacts_3f45c555; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_contacts_3f45c555 ON flows_flowstart_contacts USING btree (flowstart_id);
+
+
+--
+-- Name: flows_flowstart_contacts_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_contacts_6d82f13d ON flows_flowstart_contacts USING btree (contact_id);
+
+
+--
+-- Name: flows_flowstart_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_e93cb7eb ON flows_flowstart USING btree (created_by_id);
+
+
+--
+-- Name: flows_flowstart_groups_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_groups_0b1b2ae4 ON flows_flowstart_groups USING btree (contactgroup_id);
+
+
+--
+-- Name: flows_flowstart_groups_3f45c555; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstart_groups_3f45c555 ON flows_flowstart_groups USING btree (flowstart_id);
+
+
+--
+-- Name: flows_flowstep_017416d4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_017416d4 ON flows_flowstep USING btree (step_uuid);
+
+
+--
+-- Name: flows_flowstep_0acf093b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_0acf093b ON flows_flowstep USING btree (run_id);
+
+
+--
+-- Name: flows_flowstep_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_6d82f13d ON flows_flowstep USING btree (contact_id);
+
+
+--
+-- Name: flows_flowstep_a8b6e9f0; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_a8b6e9f0 ON flows_flowstep USING btree (left_on);
+
+
+--
+-- Name: flows_flowstep_messages_0cc31d7b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_messages_0cc31d7b ON flows_flowstep_messages USING btree (msg_id);
+
+
+--
+-- Name: flows_flowstep_messages_c01a422b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowstep_messages_c01a422b ON flows_flowstep_messages USING btree (flowstep_id);
 
 
 --
@@ -6229,52 +5788,52 @@ CREATE INDEX flows_flowstep_step_next_left_null_rule ON flows_flowstep USING btr
 
 
 --
--- Name: flows_flowstep_step_next_rule_left; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowstep_step_uuid_1e0747218e80dac8_idx; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowstep_step_next_rule_left ON flows_flowstep USING btree (step_uuid, next_uuid, rule_uuid, left_on);
-
-
---
--- Name: flows_flowstep_step_uuid; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowstep_step_uuid ON flows_flowstep USING btree (step_uuid);
+CREATE INDEX flows_flowstep_step_uuid_1e0747218e80dac8_idx ON flows_flowstep USING btree (step_uuid, next_uuid, rule_uuid, left_on);
 
 
 --
--- Name: flows_flowversion_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowstep_step_uuid_404f8c812c9e4ed2_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowversion_created_by_id ON flows_flowversion USING btree (created_by_id);
-
-
---
--- Name: flows_flowversion_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_flowversion_flow_id ON flows_flowversion USING btree (flow_id);
+CREATE INDEX flows_flowstep_step_uuid_404f8c812c9e4ed2_like ON flows_flowstep USING btree (step_uuid varchar_pattern_ops);
 
 
 --
--- Name: flows_flowversion_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowversion_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_flowversion_modified_by_id ON flows_flowversion USING btree (modified_by_id);
-
-
---
--- Name: flows_ruleset_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX flows_ruleset_flow_id ON flows_ruleset USING btree (flow_id);
+CREATE INDEX flows_flowversion_7f26ac5b ON flows_flowversion USING btree (flow_id);
 
 
 --
--- Name: flows_ruleset_uuid_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: flows_flowversion_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX flows_ruleset_uuid_like ON flows_ruleset USING btree (uuid varchar_pattern_ops);
+CREATE INDEX flows_flowversion_b3da0983 ON flows_flowversion USING btree (modified_by_id);
+
+
+--
+-- Name: flows_flowversion_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_flowversion_e93cb7eb ON flows_flowversion USING btree (created_by_id);
+
+
+--
+-- Name: flows_ruleset_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_ruleset_7f26ac5b ON flows_ruleset USING btree (flow_id);
+
+
+--
+-- Name: flows_ruleset_uuid_369aa88ed4bb10e1_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX flows_ruleset_uuid_369aa88ed4bb10e1_like ON flows_ruleset USING btree (uuid varchar_pattern_ops);
 
 
 --
@@ -6320,6 +5879,27 @@ CREATE INDEX guardian_userobjectpermission_user_id ON guardian_userobjectpermiss
 
 
 --
+-- Name: ivr_ivrcall_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX ivr_ivrcall_6d82f13d ON ivr_ivrcall USING btree (contact_id);
+
+
+--
+-- Name: ivr_ivrcall_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX ivr_ivrcall_72eb6c85 ON ivr_ivrcall USING btree (channel_id);
+
+
+--
+-- Name: ivr_ivrcall_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX ivr_ivrcall_7f26ac5b ON ivr_ivrcall USING btree (flow_id);
+
+
+--
 -- Name: ivr_ivrcall_842dde28; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
@@ -6327,45 +5907,31 @@ CREATE INDEX ivr_ivrcall_842dde28 ON ivr_ivrcall USING btree (contact_urn_id);
 
 
 --
--- Name: ivr_ivrcall_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: ivr_ivrcall_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX ivr_ivrcall_contact_id ON ivr_ivrcall USING btree (contact_id);
-
-
---
--- Name: ivr_ivrcall_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX ivr_ivrcall_created_by_id ON ivr_ivrcall USING btree (created_by_id);
+CREATE INDEX ivr_ivrcall_9cf869aa ON ivr_ivrcall USING btree (org_id);
 
 
 --
--- Name: ivr_ivrcall_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: ivr_ivrcall_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX ivr_ivrcall_flow_id ON ivr_ivrcall USING btree (flow_id);
-
-
---
--- Name: ivr_ivrcall_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX ivr_ivrcall_modified_by_id ON ivr_ivrcall USING btree (modified_by_id);
+CREATE INDEX ivr_ivrcall_b3da0983 ON ivr_ivrcall USING btree (modified_by_id);
 
 
 --
--- Name: ivr_ivrcall_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: ivr_ivrcall_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX ivr_ivrcall_org_id ON ivr_ivrcall USING btree (org_id);
+CREATE INDEX ivr_ivrcall_e93cb7eb ON ivr_ivrcall USING btree (created_by_id);
 
 
 --
--- Name: ivr_ivrcall_relayer_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: locations_adminboundary_6be37982; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX ivr_ivrcall_relayer_id ON ivr_ivrcall USING btree (channel_id);
+CREATE INDEX locations_adminboundary_6be37982 ON locations_adminboundary USING btree (parent_id);
 
 
 --
@@ -6376,17 +5942,10 @@ CREATE INDEX locations_adminboundary_geometry_id ON locations_adminboundary USIN
 
 
 --
--- Name: locations_adminboundary_osm_id_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: locations_adminboundary_osm_id_135faf5e33f83ebd_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX locations_adminboundary_osm_id_like ON locations_adminboundary USING btree (osm_id varchar_pattern_ops);
-
-
---
--- Name: locations_adminboundary_parent_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX locations_adminboundary_parent_id ON locations_adminboundary USING btree (parent_id);
+CREATE INDEX locations_adminboundary_osm_id_135faf5e33f83ebd_like ON locations_adminboundary USING btree (osm_id varchar_pattern_ops);
 
 
 --
@@ -6397,31 +5956,31 @@ CREATE INDEX locations_adminboundary_simplified_geometry_id ON locations_adminbo
 
 
 --
--- Name: locations_boundaryalias_boundary_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: locations_boundaryalias_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX locations_boundaryalias_boundary_id ON locations_boundaryalias USING btree (boundary_id);
-
-
---
--- Name: locations_boundaryalias_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX locations_boundaryalias_created_by_id ON locations_boundaryalias USING btree (created_by_id);
+CREATE INDEX locations_boundaryalias_9cf869aa ON locations_boundaryalias USING btree (org_id);
 
 
 --
--- Name: locations_boundaryalias_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: locations_boundaryalias_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX locations_boundaryalias_modified_by_id ON locations_boundaryalias USING btree (modified_by_id);
+CREATE INDEX locations_boundaryalias_b3da0983 ON locations_boundaryalias USING btree (modified_by_id);
 
 
 --
--- Name: locations_boundaryalias_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: locations_boundaryalias_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX locations_boundaryalias_org_id ON locations_boundaryalias USING btree (org_id);
+CREATE INDEX locations_boundaryalias_e93cb7eb ON locations_boundaryalias USING btree (created_by_id);
+
+
+--
+-- Name: locations_boundaryalias_eb01ad15; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX locations_boundaryalias_eb01ad15 ON locations_boundaryalias USING btree (boundary_id);
 
 
 --
@@ -6432,6 +5991,20 @@ CREATE INDEX msg_visibility_direction_type_created_inbound ON msgs_msg USING btr
 
 
 --
+-- Name: msgs_broadcast_6be37982; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_broadcast_6be37982 ON msgs_broadcast USING btree (parent_id);
+
+
+--
+-- Name: msgs_broadcast_6d10fce5; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_broadcast_6d10fce5 ON msgs_broadcast USING btree (created_on);
+
+
+--
 -- Name: msgs_broadcast_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
@@ -6439,157 +6012,150 @@ CREATE INDEX msgs_broadcast_72eb6c85 ON msgs_broadcast USING btree (channel_id);
 
 
 --
--- Name: msgs_broadcast_contacts_broadcast_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_contacts_broadcast_id ON msgs_broadcast_contacts USING btree (broadcast_id);
-
-
---
--- Name: msgs_broadcast_contacts_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_broadcast_contacts_contact_id ON msgs_broadcast_contacts USING btree (contact_id);
+CREATE INDEX msgs_broadcast_9cf869aa ON msgs_broadcast USING btree (org_id);
 
 
 --
--- Name: msgs_broadcast_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_created_by_id ON msgs_broadcast USING btree (created_by_id);
-
-
---
--- Name: msgs_broadcast_created_on; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_broadcast_created_on ON msgs_broadcast USING btree (created_on);
+CREATE INDEX msgs_broadcast_b3da0983 ON msgs_broadcast USING btree (modified_by_id);
 
 
 --
--- Name: msgs_broadcast_groups_broadcast_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_contacts_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_groups_broadcast_id ON msgs_broadcast_groups USING btree (broadcast_id);
-
-
---
--- Name: msgs_broadcast_groups_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_broadcast_groups_contactgroup_id ON msgs_broadcast_groups USING btree (contactgroup_id);
+CREATE INDEX msgs_broadcast_contacts_6d82f13d ON msgs_broadcast_contacts USING btree (contact_id);
 
 
 --
--- Name: msgs_broadcast_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_contacts_b0cb7d59; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_modified_by_id ON msgs_broadcast USING btree (modified_by_id);
-
-
---
--- Name: msgs_broadcast_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_broadcast_org_id ON msgs_broadcast USING btree (org_id);
+CREATE INDEX msgs_broadcast_contacts_b0cb7d59 ON msgs_broadcast_contacts USING btree (broadcast_id);
 
 
 --
--- Name: msgs_broadcast_parent_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_parent_id ON msgs_broadcast USING btree (parent_id);
-
-
---
--- Name: msgs_broadcast_urns_broadcast_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_broadcast_urns_broadcast_id ON msgs_broadcast_urns USING btree (broadcast_id);
+CREATE INDEX msgs_broadcast_e93cb7eb ON msgs_broadcast USING btree (created_by_id);
 
 
 --
--- Name: msgs_broadcast_urns_contacturn_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_groups_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_broadcast_urns_contacturn_id ON msgs_broadcast_urns USING btree (contacturn_id);
-
-
---
--- Name: msgs_call_channel_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_call_channel_id ON msgs_call USING btree (channel_id);
+CREATE INDEX msgs_broadcast_groups_0b1b2ae4 ON msgs_broadcast_groups USING btree (contactgroup_id);
 
 
 --
--- Name: msgs_call_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_groups_b0cb7d59; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_call_contact_id ON msgs_call USING btree (contact_id);
-
-
---
--- Name: msgs_call_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_call_created_by_id ON msgs_call USING btree (created_by_id);
+CREATE INDEX msgs_broadcast_groups_b0cb7d59 ON msgs_broadcast_groups USING btree (broadcast_id);
 
 
 --
--- Name: msgs_call_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_urns_5a8e6a7d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_call_modified_by_id ON msgs_call USING btree (modified_by_id);
-
-
---
--- Name: msgs_call_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_call_org_id ON msgs_call USING btree (org_id);
+CREATE INDEX msgs_broadcast_urns_5a8e6a7d ON msgs_broadcast_urns USING btree (contacturn_id);
 
 
 --
--- Name: msgs_exportsmstask_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_broadcast_urns_b0cb7d59; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_exportsmstask_created_by_id ON msgs_exportmessagestask USING btree (created_by_id);
-
-
---
--- Name: msgs_exportsmstask_groups_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_exportsmstask_groups_contactgroup_id ON msgs_exportmessagestask_groups USING btree (contactgroup_id);
+CREATE INDEX msgs_broadcast_urns_b0cb7d59 ON msgs_broadcast_urns USING btree (broadcast_id);
 
 
 --
--- Name: msgs_exportsmstask_groups_exportsmstask_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_call_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_exportsmstask_groups_exportsmstask_id ON msgs_exportmessagestask_groups USING btree (exportmessagestask_id);
-
-
---
--- Name: msgs_exportsmstask_label_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_exportsmstask_label_id ON msgs_exportmessagestask USING btree (label_id);
+CREATE INDEX msgs_call_6d82f13d ON msgs_call USING btree (contact_id);
 
 
 --
--- Name: msgs_exportsmstask_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_call_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_exportsmstask_modified_by_id ON msgs_exportmessagestask USING btree (modified_by_id);
+CREATE INDEX msgs_call_72eb6c85 ON msgs_call USING btree (channel_id);
 
 
 --
--- Name: msgs_exportsmstask_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_call_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_exportsmstask_org_id ON msgs_exportmessagestask USING btree (org_id);
+CREATE INDEX msgs_call_9cf869aa ON msgs_call USING btree (org_id);
+
+
+--
+-- Name: msgs_call_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_call_b3da0983 ON msgs_call USING btree (modified_by_id);
+
+
+--
+-- Name: msgs_call_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_call_e93cb7eb ON msgs_call USING btree (created_by_id);
+
+
+--
+-- Name: msgs_exportmessagestask_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_9cf869aa ON msgs_exportmessagestask USING btree (org_id);
+
+
+--
+-- Name: msgs_exportmessagestask_abec2aca; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_abec2aca ON msgs_exportmessagestask USING btree (label_id);
+
+
+--
+-- Name: msgs_exportmessagestask_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_b3da0983 ON msgs_exportmessagestask USING btree (modified_by_id);
+
+
+--
+-- Name: msgs_exportmessagestask_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_e93cb7eb ON msgs_exportmessagestask USING btree (created_by_id);
+
+
+--
+-- Name: msgs_exportmessagestask_groups_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_groups_0b1b2ae4 ON msgs_exportmessagestask_groups USING btree (contactgroup_id);
+
+
+--
+-- Name: msgs_exportmessagestask_groups_9ad8bdea; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_exportmessagestask_groups_9ad8bdea ON msgs_exportmessagestask_groups USING btree (exportmessagestask_id);
+
+
+--
+-- Name: msgs_label_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_label_9cf869aa ON msgs_label USING btree (org_id);
 
 
 --
@@ -6614,66 +6180,101 @@ CREATE INDEX msgs_label_e93cb7eb ON msgs_label USING btree (created_by_id);
 
 
 --
--- Name: msgs_label_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_0e684294; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_label_org_id ON msgs_label USING btree (org_id);
-
-
---
--- Name: msgs_msg_broadcast_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_msg_broadcast_id ON msgs_msg USING btree (broadcast_id);
+CREATE INDEX msgs_msg_0e684294 ON msgs_msg USING btree (external_id);
 
 
 --
--- Name: msgs_msg_channel_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_6bd7b554; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_channel_id ON msgs_msg USING btree (channel_id);
-
-
---
--- Name: msgs_msg_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_msg_contact_id ON msgs_msg USING btree (contact_id);
+CREATE INDEX msgs_msg_6bd7b554 ON msgs_msg USING btree (response_to_id);
 
 
 --
--- Name: msgs_msg_contact_urn_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_6d10fce5; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_contact_urn_id ON msgs_msg USING btree (contact_urn_id);
-
-
---
--- Name: msgs_msg_created_on; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_msg_created_on ON msgs_msg USING btree (created_on);
+CREATE INDEX msgs_msg_6d10fce5 ON msgs_msg USING btree (created_on);
 
 
 --
--- Name: msgs_msg_external_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_external_id ON msgs_msg USING btree (external_id);
-
-
---
--- Name: msgs_msg_labels_label_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX msgs_msg_labels_label_id ON msgs_msg_labels USING btree (label_id);
+CREATE INDEX msgs_msg_6d82f13d ON msgs_msg USING btree (contact_id);
 
 
 --
--- Name: msgs_msg_labels_msgs_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_72eb6c85; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_labels_msgs_id ON msgs_msg_labels USING btree (msg_id);
+CREATE INDEX msgs_msg_72eb6c85 ON msgs_msg USING btree (channel_id);
+
+
+--
+-- Name: msgs_msg_842dde28; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_842dde28 ON msgs_msg USING btree (contact_urn_id);
+
+
+--
+-- Name: msgs_msg_9acb4454; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_9acb4454 ON msgs_msg USING btree (status);
+
+
+--
+-- Name: msgs_msg_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_9cf869aa ON msgs_msg USING btree (org_id);
+
+
+--
+-- Name: msgs_msg_a5d9fd84; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_a5d9fd84 ON msgs_msg USING btree (topup_id);
+
+
+--
+-- Name: msgs_msg_b0cb7d59; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_b0cb7d59 ON msgs_msg USING btree (broadcast_id);
+
+
+--
+-- Name: msgs_msg_external_id_75d6fcace8b54b05_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_external_id_75d6fcace8b54b05_like ON msgs_msg USING btree (external_id varchar_pattern_ops);
+
+
+--
+-- Name: msgs_msg_f79b1d64; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_f79b1d64 ON msgs_msg USING btree (visibility);
+
+
+--
+-- Name: msgs_msg_labels_0cc31d7b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_labels_0cc31d7b ON msgs_msg_labels USING btree (msg_id);
+
+
+--
+-- Name: msgs_msg_labels_abec2aca; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX msgs_msg_labels_abec2aca ON msgs_msg_labels USING btree (label_id);
 
 
 --
@@ -6684,374 +6285,381 @@ CREATE INDEX msgs_msg_org_failed_created_on ON msgs_msg USING btree (org_id, dir
 
 
 --
--- Name: msgs_msg_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_status_5a4b234c664548c7_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_org_id ON msgs_msg USING btree (org_id);
+CREATE INDEX msgs_msg_status_5a4b234c664548c7_like ON msgs_msg USING btree (status varchar_pattern_ops);
 
 
 --
--- Name: msgs_msg_response_to_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: msgs_msg_visibility_27c941c1446e92db_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_response_to_id ON msgs_msg USING btree (response_to_id);
+CREATE INDEX msgs_msg_visibility_27c941c1446e92db_like ON msgs_msg USING btree (visibility varchar_pattern_ops);
 
 
 --
--- Name: msgs_msg_status; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_creditalert_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_status ON msgs_msg USING btree (status);
+CREATE INDEX orgs_creditalert_9cf869aa ON orgs_creditalert USING btree (org_id);
 
 
 --
--- Name: msgs_msg_topup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_creditalert_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_topup_id ON msgs_msg USING btree (topup_id);
+CREATE INDEX orgs_creditalert_b3da0983 ON orgs_creditalert USING btree (modified_by_id);
 
 
 --
--- Name: msgs_msg_visibility; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_creditalert_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX msgs_msg_visibility ON msgs_msg USING btree (visibility);
+CREATE INDEX orgs_creditalert_e93cb7eb ON orgs_creditalert USING btree (created_by_id);
 
 
 --
--- Name: orgs_creditalert_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_invitation_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_creditalert_created_by_id ON orgs_creditalert USING btree (created_by_id);
+CREATE INDEX orgs_invitation_9cf869aa ON orgs_invitation USING btree (org_id);
 
 
 --
--- Name: orgs_creditalert_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_invitation_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_creditalert_modified_by_id ON orgs_creditalert USING btree (modified_by_id);
+CREATE INDEX orgs_invitation_b3da0983 ON orgs_invitation USING btree (modified_by_id);
 
 
 --
--- Name: orgs_creditalert_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_invitation_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_creditalert_org_id ON orgs_creditalert USING btree (org_id);
+CREATE INDEX orgs_invitation_e93cb7eb ON orgs_invitation USING btree (created_by_id);
 
 
 --
--- Name: orgs_invitation_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_invitation_secret_579b9a3ce8d65a51_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_invitation_created_by_id ON orgs_invitation USING btree (created_by_id);
+CREATE INDEX orgs_invitation_secret_579b9a3ce8d65a51_like ON orgs_invitation USING btree (secret varchar_pattern_ops);
 
 
 --
--- Name: orgs_invitation_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_language_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_invitation_modified_by_id ON orgs_invitation USING btree (modified_by_id);
+CREATE INDEX orgs_language_9cf869aa ON orgs_language USING btree (org_id);
 
 
 --
--- Name: orgs_invitation_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_language_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_invitation_org_id ON orgs_invitation USING btree (org_id);
+CREATE INDEX orgs_language_b3da0983 ON orgs_language USING btree (modified_by_id);
 
 
 --
--- Name: orgs_invitation_secret_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_language_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_invitation_secret_like ON orgs_invitation USING btree (secret varchar_pattern_ops);
+CREATE INDEX orgs_language_e93cb7eb ON orgs_language USING btree (created_by_id);
 
 
 --
--- Name: orgs_language_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_199f5f21; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_language_created_by_id ON orgs_language USING btree (created_by_id);
+CREATE INDEX orgs_org_199f5f21 ON orgs_org USING btree (primary_language_id);
 
 
 --
--- Name: orgs_language_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_93bfec8a; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_language_modified_by_id ON orgs_language USING btree (modified_by_id);
+CREATE INDEX orgs_org_93bfec8a ON orgs_org USING btree (country_id);
 
 
 --
--- Name: orgs_language_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_administrators_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_language_org_id ON orgs_language USING btree (org_id);
+CREATE INDEX orgs_org_administrators_9cf869aa ON orgs_org_administrators USING btree (org_id);
 
 
 --
--- Name: orgs_org_administrators_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_administrators_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_administrators_org_id ON orgs_org_administrators USING btree (org_id);
+CREATE INDEX orgs_org_administrators_e8701ad4 ON orgs_org_administrators USING btree (user_id);
 
 
 --
--- Name: orgs_org_administrators_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_administrators_user_id ON orgs_org_administrators USING btree (user_id);
+CREATE INDEX orgs_org_b3da0983 ON orgs_org USING btree (modified_by_id);
 
 
 --
--- Name: orgs_org_country_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_country_id ON orgs_org USING btree (country_id);
+CREATE INDEX orgs_org_e93cb7eb ON orgs_org USING btree (created_by_id);
 
 
 --
--- Name: orgs_org_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_editors_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_created_by_id ON orgs_org USING btree (created_by_id);
+CREATE INDEX orgs_org_editors_9cf869aa ON orgs_org_editors USING btree (org_id);
 
 
 --
--- Name: orgs_org_editors_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_editors_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_editors_org_id ON orgs_org_editors USING btree (org_id);
+CREATE INDEX orgs_org_editors_e8701ad4 ON orgs_org_editors USING btree (user_id);
 
 
 --
--- Name: orgs_org_editors_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_slug_66e15e03ab4265ba_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_editors_user_id ON orgs_org_editors USING btree (user_id);
+CREATE INDEX orgs_org_slug_66e15e03ab4265ba_like ON orgs_org USING btree (slug varchar_pattern_ops);
 
 
 --
--- Name: orgs_org_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_viewers_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_modified_by_id ON orgs_org USING btree (modified_by_id);
+CREATE INDEX orgs_org_viewers_9cf869aa ON orgs_org_viewers USING btree (org_id);
 
 
 --
--- Name: orgs_org_name_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_org_viewers_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_name_like ON orgs_org USING btree (name varchar_pattern_ops);
+CREATE INDEX orgs_org_viewers_e8701ad4 ON orgs_org_viewers USING btree (user_id);
 
 
 --
--- Name: orgs_org_primary_language_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_topup_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_primary_language_id ON orgs_org USING btree (primary_language_id);
+CREATE INDEX orgs_topup_9cf869aa ON orgs_topup USING btree (org_id);
 
 
 --
--- Name: orgs_org_slug_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_topup_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_slug_like ON orgs_org USING btree (slug varchar_pattern_ops);
+CREATE INDEX orgs_topup_b3da0983 ON orgs_topup USING btree (modified_by_id);
 
 
 --
--- Name: orgs_org_viewers_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_topup_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_viewers_org_id ON orgs_org_viewers USING btree (org_id);
+CREATE INDEX orgs_topup_e93cb7eb ON orgs_topup USING btree (created_by_id);
 
 
 --
--- Name: orgs_org_viewers_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: orgs_usersettings_e8701ad4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_org_viewers_user_id ON orgs_org_viewers USING btree (user_id);
+CREATE INDEX orgs_usersettings_e8701ad4 ON orgs_usersettings USING btree (user_id);
 
 
 --
--- Name: orgs_topup_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: public_lead_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_topup_created_by_id ON orgs_topup USING btree (created_by_id);
+CREATE INDEX public_lead_b3da0983 ON public_lead USING btree (modified_by_id);
 
 
 --
--- Name: orgs_topup_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: public_lead_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_topup_modified_by_id ON orgs_topup USING btree (modified_by_id);
+CREATE INDEX public_lead_e93cb7eb ON public_lead USING btree (created_by_id);
 
 
 --
--- Name: orgs_topup_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: public_video_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_topup_org_id ON orgs_topup USING btree (org_id);
+CREATE INDEX public_video_b3da0983 ON public_video USING btree (modified_by_id);
 
 
 --
--- Name: orgs_usersettings_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: public_video_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX orgs_usersettings_user_id ON orgs_usersettings USING btree (user_id);
+CREATE INDEX public_video_e93cb7eb ON public_video USING btree (created_by_id);
 
 
 --
--- Name: public_lead_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: reports_report_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX public_lead_created_by_id ON public_lead USING btree (created_by_id);
+CREATE INDEX reports_report_9cf869aa ON reports_report USING btree (org_id);
 
 
 --
--- Name: public_lead_email_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: reports_report_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX public_lead_email_like ON public_lead USING btree (email varchar_pattern_ops);
+CREATE INDEX reports_report_b3da0983 ON reports_report USING btree (modified_by_id);
 
 
 --
--- Name: public_lead_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: reports_report_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX public_lead_modified_by_id ON public_lead USING btree (modified_by_id);
+CREATE INDEX reports_report_e93cb7eb ON reports_report USING btree (created_by_id);
 
 
 --
--- Name: public_video_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: schedules_schedule_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX public_video_created_by_id ON public_video USING btree (created_by_id);
+CREATE INDEX schedules_schedule_b3da0983 ON schedules_schedule USING btree (modified_by_id);
 
 
 --
--- Name: public_video_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: schedules_schedule_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX public_video_modified_by_id ON public_video USING btree (modified_by_id);
+CREATE INDEX schedules_schedule_e93cb7eb ON schedules_schedule USING btree (created_by_id);
 
 
 --
--- Name: reports_report_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_7f26ac5b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX reports_report_created_by_id ON reports_report USING btree (created_by_id);
+CREATE INDEX triggers_trigger_7f26ac5b ON triggers_trigger USING btree (flow_id);
 
 
 --
--- Name: reports_report_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX reports_report_modified_by_id ON reports_report USING btree (modified_by_id);
+CREATE INDEX triggers_trigger_9cf869aa ON triggers_trigger USING btree (org_id);
 
 
 --
--- Name: reports_report_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_b3da0983; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX reports_report_org_id ON reports_report USING btree (org_id);
+CREATE INDEX triggers_trigger_b3da0983 ON triggers_trigger USING btree (modified_by_id);
 
 
 --
--- Name: schedules_schedule_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_contacts_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX schedules_schedule_created_by_id ON schedules_schedule USING btree (created_by_id);
+CREATE INDEX triggers_trigger_contacts_6d82f13d ON triggers_trigger_contacts USING btree (contact_id);
 
 
 --
--- Name: schedules_schedule_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_contacts_b10b1f9f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX schedules_schedule_modified_by_id ON schedules_schedule USING btree (modified_by_id);
+CREATE INDEX triggers_trigger_contacts_b10b1f9f ON triggers_trigger_contacts USING btree (trigger_id);
 
 
 --
--- Name: triggers_trigger_contacts_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_e93cb7eb; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_contacts_contact_id ON triggers_trigger_contacts USING btree (contact_id);
+CREATE INDEX triggers_trigger_e93cb7eb ON triggers_trigger USING btree (created_by_id);
 
 
 --
--- Name: triggers_trigger_contacts_trigger_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_groups_0b1b2ae4; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_contacts_trigger_id ON triggers_trigger_contacts USING btree (trigger_id);
+CREATE INDEX triggers_trigger_groups_0b1b2ae4 ON triggers_trigger_groups USING btree (contactgroup_id);
 
 
 --
--- Name: triggers_trigger_created_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: triggers_trigger_groups_b10b1f9f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_created_by_id ON triggers_trigger USING btree (created_by_id);
+CREATE INDEX triggers_trigger_groups_b10b1f9f ON triggers_trigger_groups USING btree (trigger_id);
 
 
 --
--- Name: triggers_trigger_flow_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: users_failedlogin_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_flow_id ON triggers_trigger USING btree (flow_id);
+CREATE INDEX users_failedlogin_user_id ON users_failedlogin USING btree (user_id);
 
 
 --
--- Name: triggers_trigger_groups_contactgroup_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: users_passwordhistory_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_groups_contactgroup_id ON triggers_trigger_groups USING btree (contactgroup_id);
+CREATE INDEX users_passwordhistory_user_id ON users_passwordhistory USING btree (user_id);
 
 
 --
--- Name: triggers_trigger_groups_trigger_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: users_recoverytoken_token_like; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_groups_trigger_id ON triggers_trigger_groups USING btree (trigger_id);
+CREATE INDEX users_recoverytoken_token_like ON users_recoverytoken USING btree (token varchar_pattern_ops);
 
 
 --
--- Name: triggers_trigger_modified_by_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: users_recoverytoken_user_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_modified_by_id ON triggers_trigger USING btree (modified_by_id);
+CREATE INDEX users_recoverytoken_user_id ON users_recoverytoken USING btree (user_id);
 
 
 --
--- Name: triggers_trigger_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: values_value_0acf093b; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX triggers_trigger_org_id ON triggers_trigger USING btree (org_id);
+CREATE INDEX values_value_0acf093b ON values_value USING btree (run_id);
 
 
 --
--- Name: values_value_contact_field_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: values_value_4d0a6d0f; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX values_value_contact_field_id ON values_value USING btree (contact_field_id);
+CREATE INDEX values_value_4d0a6d0f ON values_value USING btree (ruleset_id);
 
 
 --
--- Name: values_value_contact_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: values_value_6d82f13d; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX values_value_contact_id ON values_value USING btree (contact_id);
+CREATE INDEX values_value_6d82f13d ON values_value USING btree (contact_id);
 
 
 --
--- Name: values_value_location_value_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: values_value_91709fb3; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX values_value_location_value_id ON values_value USING btree (location_value_id);
+CREATE INDEX values_value_91709fb3 ON values_value USING btree (location_value_id);
 
 
 --
--- Name: values_value_org_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+-- Name: values_value_9cf869aa; Type: INDEX; Schema: public; Owner: -; Tablespace: 
 --
 
-CREATE INDEX values_value_org_id ON values_value USING btree (org_id);
+CREATE INDEX values_value_9cf869aa ON values_value USING btree (org_id);
+
+
+--
+-- Name: values_value_9ff6aeda; Type: INDEX; Schema: public; Owner: -; Tablespace: 
+--
+
+CREATE INDEX values_value_9ff6aeda ON values_value USING btree (contact_field_id);
 
 
 --
@@ -7059,27 +6667,6 @@ CREATE INDEX values_value_org_id ON values_value USING btree (org_id);
 --
 
 CREATE INDEX values_value_rule_uuid_76ab85922190b184_uniq ON values_value USING btree (rule_uuid);
-
-
---
--- Name: values_value_ruleset_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX values_value_ruleset_id ON values_value USING btree (ruleset_id);
-
-
---
--- Name: values_value_run_id; Type: INDEX; Schema: public; Owner: -; Tablespace: 
---
-
-CREATE INDEX values_value_run_id ON values_value USING btree (run_id);
-
-
---
--- Name: contact_check_update_trg; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER contact_check_update_trg BEFORE UPDATE ON contacts_contact FOR EACH ROW EXECUTE PROCEDURE contact_check_update();
 
 
 --
@@ -7094,13 +6681,6 @@ CREATE TRIGGER when_contact_groups_changed_then_update_count_trg AFTER INSERT OR
 --
 
 CREATE TRIGGER when_contact_groups_truncate_then_update_count_trg AFTER TRUNCATE ON contacts_contactgroup_contacts FOR EACH STATEMENT EXECUTE PROCEDURE update_group_count();
-
-
---
--- Name: when_contacts_changed_then_update_groups_trg; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER when_contacts_changed_then_update_groups_trg AFTER INSERT OR UPDATE ON contacts_contact FOR EACH ROW EXECUTE PROCEDURE update_contact_system_groups();
 
 
 --
@@ -7121,7 +6701,7 @@ CREATE TRIGGER when_labels_truncated_then_update_count_trg AFTER TRUNCATE ON msg
 -- Name: when_msg_updated_then_update_label_counts_trg; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER when_msg_updated_then_update_label_counts_trg AFTER UPDATE OF visibility ON msgs_msg FOR EACH ROW EXECUTE PROCEDURE update_msg_user_label_counts();
+CREATE TRIGGER when_msg_updated_then_update_label_counts_trg AFTER UPDATE OF visibility ON msgs_msg FOR EACH ROW EXECUTE PROCEDURE update_label_count();
 
 
 --
@@ -7139,83 +6719,347 @@ CREATE TRIGGER when_msgs_update_then_update_topup_trg AFTER INSERT OR DELETE OR 
 
 
 --
--- Name: auth_group_permissions_permission_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: D7856ce0328a2d48e6fc1da75a134e1a; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT "D7856ce0328a2d48e6fc1da75a134e1a" FOREIGN KEY (location_value_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_apitoken_org_id_77b477695c02ab21_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_apitoken
+    ADD CONSTRAINT api_apitoken_org_id_77b477695c02ab21_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_apitoken_user_id_774044fa21de8279_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_apitoken
+    ADD CONSTRAINT api_apitoken_user_id_774044fa21de8279_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhooke_channel_id_3f4bbdf3b1d9dc52_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookevent
+    ADD CONSTRAINT api_webhooke_channel_id_3f4bbdf3b1d9dc52_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookeven_modified_by_id_2c427a2dc6358334_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookevent
+    ADD CONSTRAINT api_webhookeven_modified_by_id_2c427a2dc6358334_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookevent_created_by_id_7ebaf1a366420746_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookevent
+    ADD CONSTRAINT api_webhookevent_created_by_id_7ebaf1a366420746_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookevent_org_id_e1907a106ec0f61_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookevent
+    ADD CONSTRAINT api_webhookevent_org_id_e1907a106ec0f61_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookres_event_id_46ec3b5f77d8325f_fk_api_webhookevent_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookresult
+    ADD CONSTRAINT api_webhookres_event_id_46ec3b5f77d8325f_fk_api_webhookevent_id FOREIGN KEY (event_id) REFERENCES api_webhookevent(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookresu_modified_by_id_33992c938ef2495a_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookresult
+    ADD CONSTRAINT api_webhookresu_modified_by_id_33992c938ef2495a_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: api_webhookresul_created_by_id_7eeb5bbc1a76a694_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY api_webhookresult
+    ADD CONSTRAINT api_webhookresul_created_by_id_7eeb5bbc1a76a694_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: auth_content_type_id_508cf46651277a81_fk_django_content_type_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY auth_permission
+    ADD CONSTRAINT auth_content_type_id_508cf46651277a81_fk_django_content_type_id FOREIGN KEY (content_type_id) REFERENCES django_content_type(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: auth_group_permissio_group_id_689710a9a73b7457_fk_auth_group_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY auth_group_permissions
-    ADD CONSTRAINT auth_group_permissions_permission_id_fkey FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT auth_group_permissio_group_id_689710a9a73b7457_fk_auth_group_id FOREIGN KEY (group_id) REFERENCES auth_group(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: auth_user_groups_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: auth_group_permission_id_1f49ccbbdc69d2fc_fk_auth_permission_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY auth_user_groups
-    ADD CONSTRAINT auth_user_groups_group_id_fkey FOREIGN KEY (group_id) REFERENCES auth_group(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY auth_group_permissions
+    ADD CONSTRAINT auth_group_permission_id_1f49ccbbdc69d2fc_fk_auth_permission_id FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: auth_user_user_permissions_permission_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: auth_user__permission_id_384b62483d7071f0_fk_auth_permission_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY auth_user_user_permissions
-    ADD CONSTRAINT auth_user_user_permissions_permission_id_fkey FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT auth_user__permission_id_384b62483d7071f0_fk_auth_permission_id FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: boundary_id_refs_id_062fa703; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: auth_user_groups_group_id_33ac548dcf5f8e37_fk_auth_group_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY locations_boundaryalias
-    ADD CONSTRAINT boundary_id_refs_id_062fa703 FOREIGN KEY (boundary_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: broadcast_id_refs_id_13be1a0f4ee207d5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast_groups
-    ADD CONSTRAINT broadcast_id_refs_id_13be1a0f4ee207d5 FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY auth_user_groups
+    ADD CONSTRAINT auth_user_groups_group_id_33ac548dcf5f8e37_fk_auth_group_id FOREIGN KEY (group_id) REFERENCES auth_group(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: broadcast_id_refs_id_1bbfd8e1ec515cd5; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: auth_user_groups_user_id_4b5ed4ffdb8fd9b0_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT broadcast_id_refs_id_1bbfd8e1ec515cd5 FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: broadcast_id_refs_id_7462bf3acc906426; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast_contacts
-    ADD CONSTRAINT broadcast_id_refs_id_7462bf3acc906426 FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY auth_user_groups
+    ADD CONSTRAINT auth_user_groups_user_id_4b5ed4ffdb8fd9b0_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: broadcast_id_refs_id_c7953a11; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: auth_user_user_permiss_user_id_7f0938558328534a_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY msgs_broadcast_urns
-    ADD CONSTRAINT broadcast_id_refs_id_c7953a11 FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: call_id_refs_id_104929674b9f5123; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowrun
-    ADD CONSTRAINT call_id_refs_id_104929674b9f5123 FOREIGN KEY (call_id) REFERENCES ivr_ivrcall(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY auth_user_user_permissions
+    ADD CONSTRAINT auth_user_user_permiss_user_id_7f0938558328534a_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: campaign_id_refs_id_5ef97c1b243bb46a; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: authtoken_token_user_id_1d10c57f535fb363_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY authtoken_token
+    ADD CONSTRAINT authtoken_token_user_id_1d10c57f535fb363_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: b596316b4c8d5e8b1a642695f578a459; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask_groups
+    ADD CONSTRAINT b596316b4c8d5e8b1a642695f578a459 FOREIGN KEY (exportmessagestask_id) REFERENCES msgs_exportmessagestask(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: cam_relative_to_id_64ed25d9daddf398_fk_contacts_contactfield_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY campaigns_campaignevent
-    ADD CONSTRAINT campaign_id_refs_id_5ef97c1b243bb46a FOREIGN KEY (campaign_id) REFERENCES campaigns_campaign(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT cam_relative_to_id_64ed25d9daddf398_fk_contacts_contactfield_id FOREIGN KEY (relative_to_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaig_event_id_6059f706520cf948_fk_campaigns_campaignevent_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_eventfire
+    ADD CONSTRAINT campaig_event_id_6059f706520cf948_fk_campaigns_campaignevent_id FOREIGN KEY (event_id) REFERENCES campaigns_campaignevent(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campa_modified_by_id_41d55fb9b8bba7df_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaignevent
+    ADD CONSTRAINT campaigns_campa_modified_by_id_41d55fb9b8bba7df_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campa_modified_by_id_69154c3fa6c6464a_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaign
+    ADD CONSTRAINT campaigns_campa_modified_by_id_69154c3fa6c6464a_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campai_created_by_id_45ec573e6a7b8eb0_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaign
+    ADD CONSTRAINT campaigns_campai_created_by_id_45ec573e6a7b8eb0_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campaig_created_by_id_3c593eae2f110b3_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaignevent
+    ADD CONSTRAINT campaigns_campaig_created_by_id_3c593eae2f110b3_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campaign_id_4a86877cd9f20111_fk_campaigns_campaign_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaignevent
+    ADD CONSTRAINT campaigns_campaign_id_4a86877cd9f20111_fk_campaigns_campaign_id FOREIGN KEY (campaign_id) REFERENCES campaigns_campaign(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campaign_org_id_7bf3f205993af9b7_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaign
+    ADD CONSTRAINT campaigns_campaign_org_id_7bf3f205993af9b7_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_campaigneve_flow_id_46e3d1c67ccdde21_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaignevent
+    ADD CONSTRAINT campaigns_campaigneve_flow_id_46e3d1c67ccdde21_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_ev_contact_id_79f6e0f61ab52d46_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_eventfire
+    ADD CONSTRAINT campaigns_ev_contact_id_79f6e0f61ab52d46_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: campaigns_group_id_20cbe40ee2180696_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY campaigns_campaign
+    ADD CONSTRAINT campaigns_group_id_20cbe40ee2180696_fk_contacts_contactgroup_id FOREIGN KEY (group_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channel_sync_event_id_552d6e8aab4871e1_fk_channels_syncevent_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_alert
+    ADD CONSTRAINT channel_sync_event_id_552d6e8aab4871e1_fk_channels_syncevent_id FOREIGN KEY (sync_event_id) REFERENCES channels_syncevent(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_ale_channel_id_502b86357e84fad1_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_alert
+    ADD CONSTRAINT channels_ale_channel_id_502b86357e84fad1_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_alert_created_by_id_4d5d82e5368e9597_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_alert
+    ADD CONSTRAINT channels_alert_created_by_id_4d5d82e5368e9597_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_alert_modified_by_id_4c8cda51e5df381d_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_alert
+    ADD CONSTRAINT channels_alert_modified_by_id_4c8cda51e5df381d_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_chan_parent_id_36064d09844a158c_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_channel
+    ADD CONSTRAINT channels_chan_parent_id_36064d09844a158c_fk_channels_channel_id FOREIGN KEY (parent_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_channe_modified_by_id_62b2d4e6516f60c6_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_channel
+    ADD CONSTRAINT channels_channe_modified_by_id_62b2d4e6516f60c6_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_channel_created_by_id_6610297e551df9b4_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_channel
+    ADD CONSTRAINT channels_channel_created_by_id_6610297e551df9b4_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_channel_org_id_46a0e7153fc980b_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_channel
+    ADD CONSTRAINT channels_channel_org_id_46a0e7153fc980b_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_channellog_msg_id_56c592be3741615b_fk_msgs_msg_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_channellog
+    ADD CONSTRAINT channels_channellog_msg_id_56c592be3741615b_fk_msgs_msg_id FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_syn_channel_id_7259deefb8ce62d0_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_syncevent
+    ADD CONSTRAINT channels_syn_channel_id_7259deefb8ce62d0_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_syncev_modified_by_id_4e8922426cef6a42_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_syncevent
+    ADD CONSTRAINT channels_syncev_modified_by_id_4e8922426cef6a42_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: channels_synceven_created_by_id_8c701cdd54f5698_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY channels_syncevent
+    ADD CONSTRAINT channels_synceven_created_by_id_8c701cdd54f5698_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: co_contactfield_id_107003fe705d17b6_fk_contacts_contactfield_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contactgroup_query_fields
+    ADD CONSTRAINT co_contactfield_id_107003fe705d17b6_fk_contacts_contactfield_id FOREIGN KEY (contactfield_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -7227,155 +7071,35 @@ ALTER TABLE ONLY contacts_contactgroup_contacts
 
 
 --
--- Name: contact_field_id_refs_id_df7dbdfb; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: co_contactgroup_id_7165963c6a634f19_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT contact_field_id_refs_id_df7dbdfb FOREIGN KEY (contact_field_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_1ee8f54bcc3f0a7a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_eventfire
-    ADD CONSTRAINT contact_id_refs_id_1ee8f54bcc3f0a7a FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_contactgroup_query_fields
+    ADD CONSTRAINT co_contactgroup_id_7165963c6a634f19_fk_contacts_contactgroup_id FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: contact_id_refs_id_24d6c21dc4c10347; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: co_import_task_id_5350398e66e060f2_fk_csv_imports_importtask_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_flowstart_contacts
-    ADD CONSTRAINT contact_id_refs_id_24d6c21dc4c10347 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_284700c8; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstep
-    ADD CONSTRAINT contact_id_refs_id_284700c8 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_contactgroup
+    ADD CONSTRAINT co_import_task_id_5350398e66e060f2_fk_csv_imports_importtask_id FOREIGN KEY (import_task_id) REFERENCES csv_imports_importtask(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: contact_id_refs_id_3504f414fb9060a6; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts__group_id_1e1793ae8d8db7fd_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY msgs_broadcast_contacts
-    ADD CONSTRAINT contact_id_refs_id_3504f414fb9060a6 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_399b7589345b1f53; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_call
-    ADD CONSTRAINT contact_id_refs_id_399b7589345b1f53 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_exportcontactstask
+    ADD CONSTRAINT contacts__group_id_1e1793ae8d8db7fd_fk_contacts_contactgroup_id FOREIGN KEY (group_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: contact_id_refs_id_609f248a3c6913eb; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT contact_id_refs_id_609f248a3c6913eb FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_6e9c2b0dcfa57ce6; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger_contacts
-    ADD CONSTRAINT contact_id_refs_id_6e9c2b0dcfa57ce6 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_784bbb50e698dd81; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowrun
-    ADD CONSTRAINT contact_id_refs_id_784bbb50e698dd81 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_7c45d84b3c4134e1; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts_con_channel_id_680f1c6a3e46436c_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY contacts_contacturn
-    ADD CONSTRAINT contact_id_refs_id_7c45d84b3c4134e1 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_7d643581aa860347; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT contact_id_refs_id_7d643581aa860347 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_id_refs_id_93ca1165; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT contact_id_refs_id_93ca1165 FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contact_urn_id_refs_id_3f13a05a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT contact_urn_id_refs_id_3f13a05a FOREIGN KEY (contact_urn_id) REFERENCES contacts_contacturn(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactfield_id_refs_id_eacf313f; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contactgroup_query_fields
-    ADD CONSTRAINT contactfield_id_refs_id_eacf313f FOREIGN KEY (contactfield_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactgroup_id_refs_id_14343436daae0938; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstart_groups
-    ADD CONSTRAINT contactgroup_id_refs_id_14343436daae0938 FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactgroup_id_refs_id_2e6637e835080d9d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast_groups
-    ADD CONSTRAINT contactgroup_id_refs_id_2e6637e835080d9d FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactgroup_id_refs_id_5255cfea; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask_groups
-    ADD CONSTRAINT contactgroup_id_refs_id_5255cfea FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactgroup_id_refs_id_b63844cf; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contactgroup_query_fields
-    ADD CONSTRAINT contactgroup_id_refs_id_b63844cf FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: contactgroup_id_refs_id_ca66cb90b113da1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger_groups
-    ADD CONSTRAINT contactgroup_id_refs_id_ca66cb90b113da1 FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT contacts_con_channel_id_680f1c6a3e46436c_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -7387,6 +7111,62 @@ ALTER TABLE ONLY contacts_contactgroup_contacts
 
 
 --
+-- Name: contacts_cont_contact_id_6a14cd898947ebb_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contacturn
+    ADD CONSTRAINT contacts_cont_contact_id_6a14cd898947ebb_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contac_modified_by_id_36030c0844aaddd0_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contact
+    ADD CONSTRAINT contacts_contac_modified_by_id_36030c0844aaddd0_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contac_modified_by_id_7664e895506510c4_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contactgroup
+    ADD CONSTRAINT contacts_contac_modified_by_id_7664e895506510c4_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contact_created_by_id_1ecbe97b0263d19e_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contactgroup
+    ADD CONSTRAINT contacts_contact_created_by_id_1ecbe97b0263d19e_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contact_created_by_id_65368d79d1448356_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contact
+    ADD CONSTRAINT contacts_contact_created_by_id_65368d79d1448356_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contact_org_id_212b6808b27b8975_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contact
+    ADD CONSTRAINT contacts_contact_org_id_212b6808b27b8975_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contacts_contactfield_org_id_6d343d67f68e5bbc_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY contacts_contactfield
+    ADD CONSTRAINT contacts_contactfield_org_id_6d343d67f68e5bbc_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
 -- Name: contacts_contactgroup_org_id_4c569ecced215497_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7395,443 +7175,115 @@ ALTER TABLE ONLY contacts_contactgroup
 
 
 --
--- Name: contacturn_id_refs_id_024d0fed; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts_contacturn_org_id_281267463c7173eb_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY msgs_broadcast_urns
-    ADD CONSTRAINT contacturn_id_refs_id_024d0fed FOREIGN KEY (contacturn_id) REFERENCES contacts_contacturn(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_contacturn
+    ADD CONSTRAINT contacts_contacturn_org_id_281267463c7173eb_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: content_type_id_refs_id_41c07efb11cb62e8; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY guardian_userobjectpermission
-    ADD CONSTRAINT content_type_id_refs_id_41c07efb11cb62e8 FOREIGN KEY (content_type_id) REFERENCES django_content_type(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: content_type_id_refs_id_478017b6b7357933; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY guardian_groupobjectpermission
-    ADD CONSTRAINT content_type_id_refs_id_478017b6b7357933 FOREIGN KEY (content_type_id) REFERENCES django_content_type(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: content_type_id_refs_id_d043b34a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY auth_permission
-    ADD CONSTRAINT content_type_id_refs_id_d043b34a FOREIGN KEY (content_type_id) REFERENCES django_content_type(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: country_id_refs_id_803e28ef; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org
-    ADD CONSTRAINT country_id_refs_id_803e28ef FOREIGN KEY (country_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_10c0e57cc7a79728; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY csv_imports_importtask
-    ADD CONSTRAINT created_by_id_refs_id_10c0e57cc7a79728 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_2000d84de6e18a85; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_website
-    ADD CONSTRAINT created_by_id_refs_id_2000d84de6e18a85 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_3168bd8e280b4816; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_pagerank
-    ADD CONSTRAINT created_by_id_refs_id_3168bd8e280b4816 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_31b453568c583e3b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_creditalert
-    ADD CONSTRAINT created_by_id_refs_id_31b453568c583e3b FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_3357779d12137f23; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public_lead
-    ADD CONSTRAINT created_by_id_refs_id_3357779d12137f23 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_344c4dc08d4e79c0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_topup
-    ADD CONSTRAINT created_by_id_refs_id_344c4dc08d4e79c0 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_3487a6041ca2c1c9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_search
-    ADD CONSTRAINT created_by_id_refs_id_3487a6041ca2c1c9 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_34a43cfe; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY locations_boundaryalias
-    ADD CONSTRAINT created_by_id_refs_id_34a43cfe FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_3fda08273ed4ff50; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaign
-    ADD CONSTRAINT created_by_id_refs_id_3fda08273ed4ff50 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_423bcb531ab5992b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstart
-    ADD CONSTRAINT created_by_id_refs_id_423bcb531ab5992b FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_4276a924acd5cf9e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contactgroup
-    ADD CONSTRAINT created_by_id_refs_id_4276a924acd5cf9e FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_43bd750ae51a4aaa; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contact
-    ADD CONSTRAINT created_by_id_refs_id_43bd750ae51a4aaa FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_46995b61b9b84e2e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_call
-    ADD CONSTRAINT created_by_id_refs_id_46995b61b9b84e2e FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_470c2ab12f360eb3; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaignevent
-    ADD CONSTRAINT created_by_id_refs_id_470c2ab12f360eb3 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_488a9013a6b2ac3a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_searchposition
-    ADD CONSTRAINT created_by_id_refs_id_488a9013a6b2ac3a FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_496f1d51; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask
-    ADD CONSTRAINT created_by_id_refs_id_496f1d51 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_4994a5332759a8e1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_syncevent
-    ADD CONSTRAINT created_by_id_refs_id_4994a5332759a8e1 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_4a4c89d8e8271552; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_invitation
-    ADD CONSTRAINT created_by_id_refs_id_4a4c89d8e8271552 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_524adb83be426aba; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookevent
-    ADD CONSTRAINT created_by_id_refs_id_524adb83be426aba FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_5cedf4f88dca8b6c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookresult
-    ADD CONSTRAINT created_by_id_refs_id_5cedf4f88dca8b6c FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_6017a21a4524280; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY schedules_schedule
-    ADD CONSTRAINT created_by_id_refs_id_6017a21a4524280 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_64aa357a9e00be32; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org
-    ADD CONSTRAINT created_by_id_refs_id_64aa357a9e00be32 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_6a09878553db6cc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_exportflowresultstask
-    ADD CONSTRAINT created_by_id_refs_id_6a09878553db6cc FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_7011f13b2145170a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast
-    ADD CONSTRAINT created_by_id_refs_id_7011f13b2145170a FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_7123d39572809d86; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_channel
-    ADD CONSTRAINT created_by_id_refs_id_7123d39572809d86 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_774b6611a97a423a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT created_by_id_refs_id_774b6611a97a423a FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_7d242c12; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowversion
-    ADD CONSTRAINT created_by_id_refs_id_7d242c12 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_8de76f8914b53e2; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT created_by_id_refs_id_8de76f8914b53e2 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_a6ca7cd4; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts_export_modified_by_id_6ea002332ce10449_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY contacts_exportcontactstask
-    ADD CONSTRAINT created_by_id_refs_id_a6ca7cd4 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT contacts_export_modified_by_id_6ea002332ce10449_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: created_by_id_refs_id_b07adadc347b29f; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts_exportc_created_by_id_29f74af5cb2b52bd_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public_video
-    ADD CONSTRAINT created_by_id_refs_id_b07adadc347b29f FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_b761c265231ecce; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flow
-    ADD CONSTRAINT created_by_id_refs_id_b761c265231ecce FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_exportcontactstask
+    ADD CONSTRAINT contacts_exportc_created_by_id_29f74af5cb2b52bd_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: created_by_id_refs_id_d504ff00; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: contacts_exportcontactst_org_id_7d82443698c7b0dc_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY orgs_language
-    ADD CONSTRAINT created_by_id_refs_id_d504ff00 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: created_by_id_refs_id_e1394ac5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY reports_report
-    ADD CONSTRAINT created_by_id_refs_id_e1394ac5 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY contacts_exportcontactstask
+    ADD CONSTRAINT contacts_exportcontactst_org_id_7d82443698c7b0dc_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: created_by_id_refs_id_fe4ab50969265b0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_alert
-    ADD CONSTRAINT created_by_id_refs_id_fe4ab50969265b0 FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: crontab_id_refs_id_2c92a393ebff5e74; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: djcelery_periodictask_crontab_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY djcelery_periodictask
-    ADD CONSTRAINT crontab_id_refs_id_2c92a393ebff5e74 FOREIGN KEY (crontab_id) REFERENCES djcelery_crontabschedule(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT djcelery_periodictask_crontab_id_fkey FOREIGN KEY (crontab_id) REFERENCES djcelery_crontabschedule(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: event_id_refs_id_13bd3f5c45a36a6b; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: djcelery_periodictask_interval_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY campaigns_eventfire
-    ADD CONSTRAINT event_id_refs_id_13bd3f5c45a36a6b FOREIGN KEY (event_id) REFERENCES campaigns_campaignevent(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: event_id_refs_id_645b9ebb8ed7cc8b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookresult
-    ADD CONSTRAINT event_id_refs_id_645b9ebb8ed7cc8b FOREIGN KEY (event_id) REFERENCES api_webhookevent(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY djcelery_periodictask
+    ADD CONSTRAINT djcelery_periodictask_interval_id_fkey FOREIGN KEY (interval_id) REFERENCES djcelery_intervalschedule(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: exportflowresultstask_id_refs_id_3759edfabd6946d7; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: djcelery_taskstate_worker_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_exportflowresultstask_flows
-    ADD CONSTRAINT exportflowresultstask_id_refs_id_3759edfabd6946d7 FOREIGN KEY (exportflowresultstask_id) REFERENCES flows_exportflowresultstask(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: exportsmstask_id_refs_id_6dde0a03; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask_groups
-    ADD CONSTRAINT exportsmstask_id_refs_id_6dde0a03 FOREIGN KEY (exportmessagestask_id) REFERENCES msgs_exportmessagestask(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY djcelery_taskstate
+    ADD CONSTRAINT djcelery_taskstate_worker_id_fkey FOREIGN KEY (worker_id) REFERENCES djcelery_workerstate(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_13679e3038c0556d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT flow_id_refs_id_13679e3038c0556d FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: flow_id_refs_id_16a5e8b5cd5f9a7d; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: eeb0ddc0882ec5024ba609c0a2da578c; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY flows_exportflowresultstask_flows
-    ADD CONSTRAINT flow_id_refs_id_16a5e8b5cd5f9a7d FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT eeb0ddc0882ec5024ba609c0a2da578c FOREIGN KEY (exportflowresultstask_id) REFERENCES flows_exportflowresultstask(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_1a7c48188e66de2a; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: fl_contactgroup_id_2c18111554bb3f34_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_ruleset
-    ADD CONSTRAINT flow_id_refs_id_1a7c48188e66de2a FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: flow_id_refs_id_2b7e88c902122680; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaignevent
-    ADD CONSTRAINT flow_id_refs_id_2b7e88c902122680 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_flowstart_groups
+    ADD CONSTRAINT fl_contactgroup_id_2c18111554bb3f34_fk_contacts_contactgroup_id FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_34e5dc5bca2b90f0; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_actionlog_run_id_3369b141be764e79_fk_flows_flowrun_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_actionlog
+    ADD CONSTRAINT flows_actionlog_run_id_3369b141be764e79_fk_flows_flowrun_id FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_actionset_flow_id_114b42aa65613713_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY flows_actionset
-    ADD CONSTRAINT flow_id_refs_id_34e5dc5bca2b90f0 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT flows_actionset_flow_id_114b42aa65613713_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_6ebba82a1862669; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_exportflo_modified_by_id_245d7c6dd44b1218_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT flow_id_refs_id_6ebba82a1862669 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: flow_id_refs_id_7fc1316c73377e59; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowrun
-    ADD CONSTRAINT flow_id_refs_id_7fc1316c73377e59 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_exportflowresultstask
+    ADD CONSTRAINT flows_exportflo_modified_by_id_245d7c6dd44b1218_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_af5e3e61595ec2e; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_exportflowr_created_by_id_fe9ef751533aec2_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_flowstart
-    ADD CONSTRAINT flow_id_refs_id_af5e3e61595ec2e FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: flow_id_refs_id_d89d09e1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flow_labels
-    ADD CONSTRAINT flow_id_refs_id_d89d09e1 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_exportflowresultstask
+    ADD CONSTRAINT flows_exportflowr_created_by_id_fe9ef751533aec2_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flow_id_refs_id_eec911e8; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_exportflowresul_flow_id_673f95f0b8288e24_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_flowversion
-    ADD CONSTRAINT flow_id_refs_id_eec911e8 FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: flowlabel_id_refs_id_76fdbb7d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flow_labels
-    ADD CONSTRAINT flowlabel_id_refs_id_76fdbb7d FOREIGN KEY (flowlabel_id) REFERENCES flows_flowlabel(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_exportflowresultstask_flows
+    ADD CONSTRAINT flows_exportflowresul_flow_id_673f95f0b8288e24_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -7843,75 +7295,211 @@ ALTER TABLE ONLY flows_exportflowresultstask
 
 
 --
--- Name: flowstart_id_refs_id_149c72fcc464f547; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flow__flowlabel_id_10704d498ec0685c_fk_flows_flowlabel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow_labels
+    ADD CONSTRAINT flows_flow__flowlabel_id_10704d498ec0685c_fk_flows_flowlabel_id FOREIGN KEY (flowlabel_id) REFERENCES flows_flowlabel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flow_created_by_id_43a77db30c244340_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow
+    ADD CONSTRAINT flows_flow_created_by_id_43a77db30c244340_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flow_labels_flow_id_5687279f909acaf7_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow_labels
+    ADD CONSTRAINT flows_flow_labels_flow_id_5687279f909acaf7_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flow_modified_by_id_1198e9bc4790ef3a_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow
+    ADD CONSTRAINT flows_flow_modified_by_id_1198e9bc4790ef3a_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flow_org_id_2988f572a0b88499_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow
+    ADD CONSTRAINT flows_flow_org_id_2988f572a0b88499_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flow_saved_by_id_3f315b43cdc001_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flow
+    ADD CONSTRAINT flows_flow_saved_by_id_3f315b43cdc001_fk_auth_user_id FOREIGN KEY (saved_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowlabe_parent_id_7e406153150cf37d_fk_flows_flowlabel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowlabel
+    ADD CONSTRAINT flows_flowlabe_parent_id_7e406153150cf37d_fk_flows_flowlabel_id FOREIGN KEY (parent_id) REFERENCES flows_flowlabel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowlabel_org_id_f3717c93b4242c4_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowlabel
+    ADD CONSTRAINT flows_flowlabel_org_id_f3717c93b4242c4_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowru_contact_id_7305db203e8aca2f_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowrun
+    ADD CONSTRAINT flows_flowru_contact_id_7305db203e8aca2f_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowrun_call_id_710603b05c8eae8e_fk_ivr_ivrcall_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowrun
+    ADD CONSTRAINT flows_flowrun_call_id_710603b05c8eae8e_fk_ivr_ivrcall_id FOREIGN KEY (call_id) REFERENCES ivr_ivrcall(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowrun_flow_id_28f1fcfb7f4856f6_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowrun
+    ADD CONSTRAINT flows_flowrun_flow_id_28f1fcfb7f4856f6_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowrun_start_id_7aad68a947921557_fk_flows_flowstart_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowrun
+    ADD CONSTRAINT flows_flowrun_start_id_7aad68a947921557_fk_flows_flowstart_id FOREIGN KEY (start_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flows_flowstart_id_190f2b17edae43d4_fk_flows_flowstart_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY flows_flowstart_groups
-    ADD CONSTRAINT flowstart_id_refs_id_149c72fcc464f547 FOREIGN KEY (flowstart_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT flows_flows_flowstart_id_190f2b17edae43d4_fk_flows_flowstart_id FOREIGN KEY (flowstart_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flowstart_id_refs_id_52e7786b42d0f432; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flows_flowstart_id_2d79ad5435e02d63_fk_flows_flowstart_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY flows_flowstart_contacts
-    ADD CONSTRAINT flowstart_id_refs_id_52e7786b42d0f432 FOREIGN KEY (flowstart_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT flows_flows_flowstart_id_2d79ad5435e02d63_fk_flows_flowstart_id FOREIGN KEY (flowstart_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: flowstep_id_refs_id_62dfbfb72af3f8a7; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flowst_contact_id_6999c2e63a54b80b_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowstep
+    ADD CONSTRAINT flows_flowst_contact_id_6999c2e63a54b80b_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowst_contact_id_75c9d7eac0ef3c8f_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowstart_contacts
+    ADD CONSTRAINT flows_flowst_contact_id_75c9d7eac0ef3c8f_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowstart_created_by_id_76d9f9b94eeb6ed7_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowstart
+    ADD CONSTRAINT flows_flowstart_created_by_id_76d9f9b94eeb6ed7_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowstart_flow_id_368fb27924aa80dd_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowstart
+    ADD CONSTRAINT flows_flowstart_flow_id_368fb27924aa80dd_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowstart_modified_by_id_330baf525009d6dd_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowstart
+    ADD CONSTRAINT flows_flowstart_modified_by_id_330baf525009d6dd_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowste_flowstep_id_60796a9cd2be2508_fk_flows_flowstep_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY flows_flowstep_messages
-    ADD CONSTRAINT flowstep_id_refs_id_62dfbfb72af3f8a7 FOREIGN KEY (flowstep_id) REFERENCES flows_flowstep(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT flows_flowste_flowstep_id_60796a9cd2be2508_fk_flows_flowstep_id FOREIGN KEY (flowstep_id) REFERENCES flows_flowstep(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: group_id_refs_id_1d1dde31576d4670; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flowstep_messages_msg_id_223950c11747ded6_fk_msgs_msg_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY guardian_groupobjectpermission
-    ADD CONSTRAINT group_id_refs_id_1d1dde31576d4670 FOREIGN KEY (group_id) REFERENCES auth_group(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: group_id_refs_id_6dbdd41c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_exportcontactstask
-    ADD CONSTRAINT group_id_refs_id_6dbdd41c FOREIGN KEY (group_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_flowstep_messages
+    ADD CONSTRAINT flows_flowstep_messages_msg_id_223950c11747ded6_fk_msgs_msg_id FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: group_id_refs_id_7c00c136f3a7aa27; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flowstep_run_id_6957e68e18e66b70_fk_flows_flowrun_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY campaigns_campaign
-    ADD CONSTRAINT group_id_refs_id_7c00c136f3a7aa27 FOREIGN KEY (group_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: group_id_refs_id_f4b32aac; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY auth_group_permissions
-    ADD CONSTRAINT group_id_refs_id_f4b32aac FOREIGN KEY (group_id) REFERENCES auth_group(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_flowstep
+    ADD CONSTRAINT flows_flowstep_run_id_6957e68e18e66b70_fk_flows_flowrun_id FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: import_task_id_refs_id_129e1c5e8f7834f3; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flowversi_modified_by_id_768a580cc75a82fb_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY contacts_contactgroup
-    ADD CONSTRAINT import_task_id_refs_id_129e1c5e8f7834f3 FOREIGN KEY (import_task_id) REFERENCES csv_imports_importtask(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_flowversion
+    ADD CONSTRAINT flows_flowversi_modified_by_id_768a580cc75a82fb_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: interval_id_refs_id_672c7616f2054349; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: flows_flowversio_created_by_id_50e12f01017c3519_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY djcelery_periodictask
-    ADD CONSTRAINT interval_id_refs_id_672c7616f2054349 FOREIGN KEY (interval_id) REFERENCES djcelery_intervalschedule(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY flows_flowversion
+    ADD CONSTRAINT flows_flowversio_created_by_id_50e12f01017c3519_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_flowversion_flow_id_a7316e73678d305_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_flowversion
+    ADD CONSTRAINT flows_flowversion_flow_id_a7316e73678d305_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: flows_ruleset_flow_id_5ea82f6f807cb5d7_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY flows_ruleset
+    ADD CONSTRAINT flows_ruleset_flow_id_5ea82f6f807cb5d7_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -7923,299 +7511,155 @@ ALTER TABLE ONLY ivr_ivrcall
 
 
 --
--- Name: label_id_refs_id_6916c8fb8329be69; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_msg_labels
-    ADD CONSTRAINT label_id_refs_id_6916c8fb8329be69 FOREIGN KEY (label_id) REFERENCES msgs_label(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: label_id_refs_id_73b41ef0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask
-    ADD CONSTRAINT label_id_refs_id_73b41ef0 FOREIGN KEY (label_id) REFERENCES msgs_label(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: location_value_id_refs_id_09e0d5e1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT location_value_id_refs_id_09e0d5e1 FOREIGN KEY (location_value_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_10c0e57cc7a79728; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY csv_imports_importtask
-    ADD CONSTRAINT modified_by_id_refs_id_10c0e57cc7a79728 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_2000d84de6e18a85; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_website
-    ADD CONSTRAINT modified_by_id_refs_id_2000d84de6e18a85 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_3168bd8e280b4816; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_pagerank
-    ADD CONSTRAINT modified_by_id_refs_id_3168bd8e280b4816 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_31b453568c583e3b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_creditalert
-    ADD CONSTRAINT modified_by_id_refs_id_31b453568c583e3b FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_3357779d12137f23; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public_lead
-    ADD CONSTRAINT modified_by_id_refs_id_3357779d12137f23 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_344c4dc08d4e79c0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_topup
-    ADD CONSTRAINT modified_by_id_refs_id_344c4dc08d4e79c0 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_3487a6041ca2c1c9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_search
-    ADD CONSTRAINT modified_by_id_refs_id_3487a6041ca2c1c9 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_34a43cfe; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY locations_boundaryalias
-    ADD CONSTRAINT modified_by_id_refs_id_34a43cfe FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_3fda08273ed4ff50; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaign
-    ADD CONSTRAINT modified_by_id_refs_id_3fda08273ed4ff50 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_423bcb531ab5992b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstart
-    ADD CONSTRAINT modified_by_id_refs_id_423bcb531ab5992b FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_4276a924acd5cf9e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contactgroup
-    ADD CONSTRAINT modified_by_id_refs_id_4276a924acd5cf9e FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_43bd750ae51a4aaa; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contact
-    ADD CONSTRAINT modified_by_id_refs_id_43bd750ae51a4aaa FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_46995b61b9b84e2e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_call
-    ADD CONSTRAINT modified_by_id_refs_id_46995b61b9b84e2e FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_470c2ab12f360eb3; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaignevent
-    ADD CONSTRAINT modified_by_id_refs_id_470c2ab12f360eb3 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_488a9013a6b2ac3a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_searchposition
-    ADD CONSTRAINT modified_by_id_refs_id_488a9013a6b2ac3a FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_496f1d51; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask
-    ADD CONSTRAINT modified_by_id_refs_id_496f1d51 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_4994a5332759a8e1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_syncevent
-    ADD CONSTRAINT modified_by_id_refs_id_4994a5332759a8e1 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_4a4c89d8e8271552; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_invitation
-    ADD CONSTRAINT modified_by_id_refs_id_4a4c89d8e8271552 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_524adb83be426aba; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookevent
-    ADD CONSTRAINT modified_by_id_refs_id_524adb83be426aba FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_5cedf4f88dca8b6c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookresult
-    ADD CONSTRAINT modified_by_id_refs_id_5cedf4f88dca8b6c FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_6017a21a4524280; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY schedules_schedule
-    ADD CONSTRAINT modified_by_id_refs_id_6017a21a4524280 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_64aa357a9e00be32; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org
-    ADD CONSTRAINT modified_by_id_refs_id_64aa357a9e00be32 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_6a09878553db6cc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_exportflowresultstask
-    ADD CONSTRAINT modified_by_id_refs_id_6a09878553db6cc FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_7011f13b2145170a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast
-    ADD CONSTRAINT modified_by_id_refs_id_7011f13b2145170a FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_7123d39572809d86; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_channel
-    ADD CONSTRAINT modified_by_id_refs_id_7123d39572809d86 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_774b6611a97a423a; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_channel_id_1a52f91ec0cba92e_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT modified_by_id_refs_id_774b6611a97a423a FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT ivr_ivrcall_channel_id_1a52f91ec0cba92e_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: modified_by_id_refs_id_7d242c12; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_contact_id_419ce6de95a060f9_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_flowversion
-    ADD CONSTRAINT modified_by_id_refs_id_7d242c12 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_8de76f8914b53e2; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT modified_by_id_refs_id_8de76f8914b53e2 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY ivr_ivrcall
+    ADD CONSTRAINT ivr_ivrcall_contact_id_419ce6de95a060f9_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: modified_by_id_refs_id_a6ca7cd4; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_created_by_id_6b562edc4347843a_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY contacts_exportcontactstask
-    ADD CONSTRAINT modified_by_id_refs_id_a6ca7cd4 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_b07adadc347b29f; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public_video
-    ADD CONSTRAINT modified_by_id_refs_id_b07adadc347b29f FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY ivr_ivrcall
+    ADD CONSTRAINT ivr_ivrcall_created_by_id_6b562edc4347843a_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: modified_by_id_refs_id_b761c265231ecce; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_flow_id_8be421ccbc6ab4_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY flows_flow
-    ADD CONSTRAINT modified_by_id_refs_id_b761c265231ecce FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: modified_by_id_refs_id_d504ff00; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_language
-    ADD CONSTRAINT modified_by_id_refs_id_d504ff00 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY ivr_ivrcall
+    ADD CONSTRAINT ivr_ivrcall_flow_id_8be421ccbc6ab4_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: modified_by_id_refs_id_e1394ac5; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_modified_by_id_574e7f801edef74c_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY reports_report
-    ADD CONSTRAINT modified_by_id_refs_id_e1394ac5 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY ivr_ivrcall
+    ADD CONSTRAINT ivr_ivrcall_modified_by_id_574e7f801edef74c_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: modified_by_id_refs_id_fe4ab50969265b0; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: ivr_ivrcall_org_id_35bf0364666e6b1f_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY channels_alert
-    ADD CONSTRAINT modified_by_id_refs_id_fe4ab50969265b0 FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY ivr_ivrcall
+    ADD CONSTRAINT ivr_ivrcall_org_id_35bf0364666e6b1f_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: loca_boundary_id_17d6c0f894dfa788_fk_locations_adminboundary_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY locations_boundaryalias
+    ADD CONSTRAINT loca_boundary_id_17d6c0f894dfa788_fk_locations_adminboundary_id FOREIGN KEY (boundary_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: locati_parent_id_41e8ac6845aa81af_fk_locations_adminboundary_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY locations_adminboundary
+    ADD CONSTRAINT locati_parent_id_41e8ac6845aa81af_fk_locations_adminboundary_id FOREIGN KEY (parent_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: locations_bound_modified_by_id_3988b5c65cd8bbf2_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY locations_boundaryalias
+    ADD CONSTRAINT locations_bound_modified_by_id_3988b5c65cd8bbf2_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: locations_bounda_created_by_id_3a1891421ba51f48_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY locations_boundaryalias
+    ADD CONSTRAINT locations_bounda_created_by_id_3a1891421ba51f48_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: locations_boundaryalias_org_id_7f54533484973f5f_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY locations_boundaryalias
+    ADD CONSTRAINT locations_boundaryalias_org_id_7f54533484973f5f_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: ms_contactgroup_id_20a9b0f24aa76602_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask_groups
+    ADD CONSTRAINT ms_contactgroup_id_20a9b0f24aa76602_fk_contacts_contactgroup_id FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: ms_contactgroup_id_69fa68e0f5da4933_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_groups
+    ADD CONSTRAINT ms_contactgroup_id_69fa68e0f5da4933_fk_contacts_contactgroup_id FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs__contact_urn_id_59810d7ced4679b1_fk_contacts_contacturn_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_msg
+    ADD CONSTRAINT msgs__contact_urn_id_59810d7ced4679b1_fk_contacts_contacturn_id FOREIGN KEY (contact_urn_id) REFERENCES contacts_contacturn(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_b_contacturn_id_6650304a8351a905_fk_contacts_contacturn_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_urns
+    ADD CONSTRAINT msgs_b_contacturn_id_6650304a8351a905_fk_contacts_contacturn_id FOREIGN KEY (contacturn_id) REFERENCES contacts_contacturn(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadc_schedule_id_18fb3a4522250d_fk_schedules_schedule_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast
+    ADD CONSTRAINT msgs_broadc_schedule_id_18fb3a4522250d_fk_schedules_schedule_id FOREIGN KEY (schedule_id) REFERENCES schedules_schedule(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadca_broadcast_id_273686d8dda14f12_fk_msgs_broadcast_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_groups
+    ADD CONSTRAINT msgs_broadca_broadcast_id_273686d8dda14f12_fk_msgs_broadcast_id FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadca_broadcast_id_5b4fa96ddab8e374_fk_msgs_broadcast_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_urns
+    ADD CONSTRAINT msgs_broadca_broadcast_id_5b4fa96ddab8e374_fk_msgs_broadcast_id FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadca_broadcast_id_62a015996c701a93_fk_msgs_broadcast_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_contacts
+    ADD CONSTRAINT msgs_broadca_broadcast_id_62a015996c701a93_fk_msgs_broadcast_id FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -8224,6 +7668,118 @@ ALTER TABLE ONLY channels_alert
 
 ALTER TABLE ONLY msgs_broadcast
     ADD CONSTRAINT msgs_broadca_channel_id_20eff13de920a190_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadca_contact_id_24f586819443ac38_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast_contacts
+    ADD CONSTRAINT msgs_broadca_contact_id_24f586819443ac38_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadcast_created_by_id_9e977c111c9eed8_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast
+    ADD CONSTRAINT msgs_broadcast_created_by_id_9e977c111c9eed8_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadcast_modified_by_id_70f33f6bac4b05fe_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast
+    ADD CONSTRAINT msgs_broadcast_modified_by_id_70f33f6bac4b05fe_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadcast_org_id_44bb43690abeb62f_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast
+    ADD CONSTRAINT msgs_broadcast_org_id_44bb43690abeb62f_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_broadcast_parent_id_3b06e0868b0e47b0_fk_msgs_broadcast_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_broadcast
+    ADD CONSTRAINT msgs_broadcast_parent_id_3b06e0868b0e47b0_fk_msgs_broadcast_id FOREIGN KEY (parent_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_call_channel_id_50592d73e235a8c0_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_call
+    ADD CONSTRAINT msgs_call_channel_id_50592d73e235a8c0_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_call_contact_id_158445ad438f5a67_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_call
+    ADD CONSTRAINT msgs_call_contact_id_158445ad438f5a67_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_call_created_by_id_2a586032f24d628_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_call
+    ADD CONSTRAINT msgs_call_created_by_id_2a586032f24d628_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_call_modified_by_id_78983bab53954452_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_call
+    ADD CONSTRAINT msgs_call_modified_by_id_78983bab53954452_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_call_org_id_f51c8e77fe5007f_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_call
+    ADD CONSTRAINT msgs_call_org_id_f51c8e77fe5007f_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_exportmessa_created_by_id_471f7a032fa4318f_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask
+    ADD CONSTRAINT msgs_exportmessa_created_by_id_471f7a032fa4318f_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_exportmessa_modified_by_id_65c0a1ac1ec6ffd_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask
+    ADD CONSTRAINT msgs_exportmessa_modified_by_id_65c0a1ac1ec6ffd_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_exportmessagest_label_id_4e6ef73cac56278e_fk_msgs_label_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask
+    ADD CONSTRAINT msgs_exportmessagest_label_id_4e6ef73cac56278e_fk_msgs_label_id FOREIGN KEY (label_id) REFERENCES msgs_label(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: msgs_exportmessagestask_org_id_45aa71572acdee88_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_exportmessagestask
+    ADD CONSTRAINT msgs_exportmessagestask_org_id_45aa71572acdee88_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -8251,603 +7807,451 @@ ALTER TABLE ONLY msgs_label
 
 
 --
--- Name: org_id_refs_id_08cd3dce; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_exportmessagestask
-    ADD CONSTRAINT org_id_refs_id_08cd3dce FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_1724be74; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_language
-    ADD CONSTRAINT org_id_refs_id_1724be74 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_17a2c18cdf4cf271; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contact
-    ADD CONSTRAINT org_id_refs_id_17a2c18cdf4cf271 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_24f46abdb08c603e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_creditalert
-    ADD CONSTRAINT org_id_refs_id_24f46abdb08c603e FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_2d6992068197fc39; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org_viewers
-    ADD CONSTRAINT org_id_refs_id_2d6992068197fc39 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_307a5e04fe37123b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_apitoken
-    ADD CONSTRAINT org_id_refs_id_307a5e04fe37123b FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_332e45d81ba9271d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaign
-    ADD CONSTRAINT org_id_refs_id_332e45d81ba9271d FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_38123a03059f94b9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contacturn
-    ADD CONSTRAINT org_id_refs_id_38123a03059f94b9 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_3cdf661e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY reports_report
-    ADD CONSTRAINT org_id_refs_id_3cdf661e FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_41686d2989a6f1ac; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_label_org_id_72495077cc142a8c_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_label
-    ADD CONSTRAINT org_id_refs_id_41686d2989a6f1ac FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_label_org_id_72495077cc142a8c_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: org_id_refs_id_42a499a3fbc82f3d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast
-    ADD CONSTRAINT org_id_refs_id_42a499a3fbc82f3d FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_4889ed1e172d5a6d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT org_id_refs_id_4889ed1e172d5a6d FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_4e0ad1b143284e1; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_broadcast_id_4fac17980f6cfb26_fk_msgs_broadcast_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT org_id_refs_id_4e0ad1b143284e1 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_msg_broadcast_id_4fac17980f6cfb26_fk_msgs_broadcast_id FOREIGN KEY (broadcast_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: org_id_refs_id_4ff3b50d5e3642ed; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookevent
-    ADD CONSTRAINT org_id_refs_id_4ff3b50d5e3642ed FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_5100f9430bb89aa1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_channel
-    ADD CONSTRAINT org_id_refs_id_5100f9430bb89aa1 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_5462677619ea3ebc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org_editors
-    ADD CONSTRAINT org_id_refs_id_5462677619ea3ebc FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_54d54d2b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT org_id_refs_id_54d54d2b FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_6357287ec09f1fe7; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flow
-    ADD CONSTRAINT org_id_refs_id_6357287ec09f1fe7 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_65d150fc1504ec2b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_call
-    ADD CONSTRAINT org_id_refs_id_65d150fc1504ec2b FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_678f9b66ee4fc79; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org_administrators
-    ADD CONSTRAINT org_id_refs_id_678f9b66ee4fc79 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_6b782c6f; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowlabel
-    ADD CONSTRAINT org_id_refs_id_6b782c6f FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_6edf00c01955e73; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_topup
-    ADD CONSTRAINT org_id_refs_id_6edf00c01955e73 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_74ecf77b27d76207; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_invitation
-    ADD CONSTRAINT org_id_refs_id_74ecf77b27d76207 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_87792018f4b9f69; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT org_id_refs_id_87792018f4b9f69 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_af6eb9c2; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY locations_boundaryalias
-    ADD CONSTRAINT org_id_refs_id_af6eb9c2 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_cf8f98eced9c76a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contactfield
-    ADD CONSTRAINT org_id_refs_id_cf8f98eced9c76a FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: org_id_refs_id_f101c665; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_exportcontactstask
-    ADD CONSTRAINT org_id_refs_id_f101c665 FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: parent_id_refs_id_076599a3; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_channel
-    ADD CONSTRAINT parent_id_refs_id_076599a3 FOREIGN KEY (parent_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: parent_id_refs_id_4e8db3b1d86baa49; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast
-    ADD CONSTRAINT parent_id_refs_id_4e8db3b1d86baa49 FOREIGN KEY (parent_id) REFERENCES msgs_broadcast(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: parent_id_refs_id_9b4c175d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY locations_adminboundary
-    ADD CONSTRAINT parent_id_refs_id_9b4c175d FOREIGN KEY (parent_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: parent_id_refs_id_d16c3aa6; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowlabel
-    ADD CONSTRAINT parent_id_refs_id_d16c3aa6 FOREIGN KEY (parent_id) REFERENCES flows_flowlabel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: permission_id_refs_id_4d2ad9935b560df; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY guardian_groupobjectpermission
-    ADD CONSTRAINT permission_id_refs_id_4d2ad9935b560df FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: permission_id_refs_id_6b69e5b38352772a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY guardian_userobjectpermission
-    ADD CONSTRAINT permission_id_refs_id_6b69e5b38352772a FOREIGN KEY (permission_id) REFERENCES auth_permission(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: primary_language_id_refs_id_a770813d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org
-    ADD CONSTRAINT primary_language_id_refs_id_a770813d FOREIGN KEY (primary_language_id) REFERENCES orgs_language(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: related_to_id_refs_id_46269ba16cec53c5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY campaigns_campaignevent
-    ADD CONSTRAINT related_to_id_refs_id_46269ba16cec53c5 FOREIGN KEY (relative_to_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_15db4e071fdd509b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_alert
-    ADD CONSTRAINT relayer_id_refs_id_15db4e071fdd509b FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_2ccb4cd38ac61f37; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_channel_id_4e0904d359b1c974_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT relayer_id_refs_id_2ccb4cd38ac61f37 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_msg_channel_id_4e0904d359b1c974_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: relayer_id_refs_id_4fa37a4a71ff7aa5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY api_webhookevent
-    ADD CONSTRAINT relayer_id_refs_id_4fa37a4a71ff7aa5 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_56177ce05fb3e43; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_call
-    ADD CONSTRAINT relayer_id_refs_id_56177ce05fb3e43 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_63e41d5a7b0d0025; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY ivr_ivrcall
-    ADD CONSTRAINT relayer_id_refs_id_63e41d5a7b0d0025 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_7f061d282afdffbc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_syncevent
-    ADD CONSTRAINT relayer_id_refs_id_7f061d282afdffbc FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_c53f0e75; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY contacts_contacturn
-    ADD CONSTRAINT relayer_id_refs_id_c53f0e75 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: relayer_id_refs_id_e8f4d6e4; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT relayer_id_refs_id_e8f4d6e4 FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: response_to_id_refs_id_3a3b14e5a428ab89; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_contact_id_4d2b08b41a2e4165_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT response_to_id_refs_id_3a3b14e5a428ab89 FOREIGN KEY (response_to_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_msg_contact_id_4d2b08b41a2e4165_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: ruleset_id_refs_id_fb349cdd; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT ruleset_id_refs_id_fb349cdd FOREIGN KEY (ruleset_id) REFERENCES flows_ruleset(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: run_id_refs_id_3c5208e6a8d5399a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_actionlog
-    ADD CONSTRAINT run_id_refs_id_3c5208e6a8d5399a FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: run_id_refs_id_7a74adea7882cf3d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstep
-    ADD CONSTRAINT run_id_refs_id_7a74adea7882cf3d FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: run_id_refs_id_a0acbaa9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY values_value
-    ADD CONSTRAINT run_id_refs_id_a0acbaa9 FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: saved_by_id_refs_id_a8ea6f14; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flow
-    ADD CONSTRAINT saved_by_id_refs_id_a8ea6f14 FOREIGN KEY (saved_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: schedule_id_refs_id_5319e4b7780eb68f; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger
-    ADD CONSTRAINT schedule_id_refs_id_5319e4b7780eb68f FOREIGN KEY (schedule_id) REFERENCES schedules_schedule(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: schedule_id_refs_id_770d8203a7c87a5d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY msgs_broadcast
-    ADD CONSTRAINT schedule_id_refs_id_770d8203a7c87a5d FOREIGN KEY (schedule_id) REFERENCES schedules_schedule(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: search_id_refs_id_37bd94af289e5d34; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_searchposition
-    ADD CONSTRAINT search_id_refs_id_37bd94af289e5d34 FOREIGN KEY (search_id) REFERENCES dashboard_search(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: sms_id_refs_id_6afda843f07d0887; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowstep_messages
-    ADD CONSTRAINT sms_id_refs_id_6afda843f07d0887 FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: sms_id_refs_id_6ce29883cc671bee; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_labels_label_id_57f599ef4afb99dc_fk_msgs_label_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_msg_labels
-    ADD CONSTRAINT sms_id_refs_id_6ce29883cc671bee FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_msg_labels_label_id_57f599ef4afb99dc_fk_msgs_label_id FOREIGN KEY (label_id) REFERENCES msgs_label(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: sms_id_refs_id_cbffe71ce9c944e; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_labels_msg_id_6388492dcafc37d1_fk_msgs_msg_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY channels_channellog
-    ADD CONSTRAINT sms_id_refs_id_cbffe71ce9c944e FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: start_id_refs_id_07e3fbae; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY flows_flowrun
-    ADD CONSTRAINT start_id_refs_id_07e3fbae FOREIGN KEY (start_id) REFERENCES flows_flowstart(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY msgs_msg_labels
+    ADD CONSTRAINT msgs_msg_labels_msg_id_6388492dcafc37d1_fk_msgs_msg_id FOREIGN KEY (msg_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: sync_event_id_refs_id_1fa4ecc9f2d11a4; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY channels_alert
-    ADD CONSTRAINT sync_event_id_refs_id_1fa4ecc9f2d11a4 FOREIGN KEY (sync_event_id) REFERENCES channels_syncevent(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: topup_id_refs_id_37a3abe8; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_org_id_26000d4f3e2df035_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY msgs_msg
-    ADD CONSTRAINT topup_id_refs_id_37a3abe8 FOREIGN KEY (topup_id) REFERENCES orgs_topup(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT msgs_msg_org_id_26000d4f3e2df035_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: trigger_id_refs_id_1ef74137b8d38993; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_response_to_id_45a3c38a6499df3a_fk_msgs_msg_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY triggers_trigger_groups
-    ADD CONSTRAINT trigger_id_refs_id_1ef74137b8d38993 FOREIGN KEY (trigger_id) REFERENCES triggers_trigger(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: trigger_id_refs_id_f42ab82ea7d3bbe; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY triggers_trigger_contacts
-    ADD CONSTRAINT trigger_id_refs_id_f42ab82ea7d3bbe FOREIGN KEY (trigger_id) REFERENCES triggers_trigger(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY msgs_msg
+    ADD CONSTRAINT msgs_msg_response_to_id_45a3c38a6499df3a_fk_msgs_msg_id FOREIGN KEY (response_to_id) REFERENCES msgs_msg(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_1851bb7c05c4f994; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: msgs_msg_topup_id_5229233211d7a35f_fk_orgs_topup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY msgs_msg
+    ADD CONSTRAINT msgs_msg_topup_id_5229233211d7a35f_fk_orgs_topup_id FOREIGN KEY (topup_id) REFERENCES orgs_topup(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs__country_id_4d13c8b06b539c33_fk_locations_adminboundary_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_org
+    ADD CONSTRAINT orgs__country_id_4d13c8b06b539c33_fk_locations_adminboundary_id FOREIGN KEY (country_id) REFERENCES locations_adminboundary(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_creditaler_modified_by_id_60a9e9bf88b281ef_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_creditalert
+    ADD CONSTRAINT orgs_creditaler_modified_by_id_60a9e9bf88b281ef_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_creditalert_created_by_id_65ec03c75f0bcc3b_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_creditalert
+    ADD CONSTRAINT orgs_creditalert_created_by_id_65ec03c75f0bcc3b_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_creditalert_org_id_16cf0d6d4f0351e4_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_creditalert
+    ADD CONSTRAINT orgs_creditalert_org_id_16cf0d6d4f0351e4_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_invitation_created_by_id_4ae7217040b478ae_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_invitation
+    ADD CONSTRAINT orgs_invitation_created_by_id_4ae7217040b478ae_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_invitation_modified_by_id_45203d979e7a2528_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_invitation
+    ADD CONSTRAINT orgs_invitation_modified_by_id_45203d979e7a2528_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_invitation_org_id_7576921ea005d393_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_invitation
+    ADD CONSTRAINT orgs_invitation_org_id_7576921ea005d393_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_language_created_by_id_5c7506ea75406e8b_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_language
+    ADD CONSTRAINT orgs_language_created_by_id_5c7506ea75406e8b_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_language_modified_by_id_1c5f5a7cf156909f_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_language
+    ADD CONSTRAINT orgs_language_modified_by_id_1c5f5a7cf156909f_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_language_org_id_5eed730ebdc71ccc_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_language
+    ADD CONSTRAINT orgs_language_org_id_5eed730ebdc71ccc_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_o_primary_language_id_38dfc7d8636f176f_fk_orgs_language_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_org
+    ADD CONSTRAINT orgs_o_primary_language_id_38dfc7d8636f176f_fk_orgs_language_id FOREIGN KEY (primary_language_id) REFERENCES orgs_language(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_org_administrator_user_id_54ffec6ceb234cad_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY orgs_org_administrators
-    ADD CONSTRAINT user_id_refs_id_1851bb7c05c4f994 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT orgs_org_administrator_user_id_54ffec6ceb234cad_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_40c41112; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orgs_org_administrators_org_id_4a63c5e1e9112a2b_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY auth_user_groups
-    ADD CONSTRAINT user_id_refs_id_40c41112 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: user_id_refs_id_44820666ba86f712; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY orgs_org_viewers
-    ADD CONSTRAINT user_id_refs_id_44820666ba86f712 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY orgs_org_administrators
+    ADD CONSTRAINT orgs_org_administrators_org_id_4a63c5e1e9112a2b_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_4aadac60a67c4fc8; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orgs_org_created_by_id_7dc2cdc9ca6bb3ce_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY api_apitoken
-    ADD CONSTRAINT user_id_refs_id_4aadac60a67c4fc8 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: user_id_refs_id_4dc23c39; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY auth_user_user_permissions
-    ADD CONSTRAINT user_id_refs_id_4dc23c39 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY orgs_org
+    ADD CONSTRAINT orgs_org_created_by_id_7dc2cdc9ca6bb3ce_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_614e2019c95e8429; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orgs_org_editors_org_id_75f9ebdda677f6de_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY orgs_org_editors
-    ADD CONSTRAINT user_id_refs_id_614e2019c95e8429 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT orgs_org_editors_org_id_75f9ebdda677f6de_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_7fd06f635656ace4; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orgs_org_editors_user_id_4063d036091838ca_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY authtoken_token
-    ADD CONSTRAINT user_id_refs_id_7fd06f635656ace4 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY orgs_org_editors
+    ADD CONSTRAINT orgs_org_editors_user_id_4063d036091838ca_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_db93ce6a; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: orgs_org_modified_by_id_5b12a551eb261ef8_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_org
+    ADD CONSTRAINT orgs_org_modified_by_id_5b12a551eb261ef8_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_org_viewers_org_id_24f887033e669cad_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_org_viewers
+    ADD CONSTRAINT orgs_org_viewers_org_id_24f887033e669cad_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_org_viewers_user_id_646d8ba9c4c29c05_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_org_viewers
+    ADD CONSTRAINT orgs_org_viewers_user_id_646d8ba9c4c29c05_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_topup_created_by_id_1f04590f31ba1440_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_topup
+    ADD CONSTRAINT orgs_topup_created_by_id_1f04590f31ba1440_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_topup_modified_by_id_3aaf3f8eee3fc0ba_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_topup
+    ADD CONSTRAINT orgs_topup_modified_by_id_3aaf3f8eee3fc0ba_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_topup_org_id_5e04c4c8e3934ce7_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY orgs_topup
+    ADD CONSTRAINT orgs_topup_org_id_5e04c4c8e3934ce7_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: orgs_usersettings_user_id_78faf346ec8d78dc_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY orgs_usersettings
-    ADD CONSTRAINT user_id_refs_id_db93ce6a FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+    ADD CONSTRAINT orgs_usersettings_user_id_78faf346ec8d78dc_fk_auth_user_id FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: user_id_refs_id_e4b08bac101bc94; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: public_lead_created_by_id_40780a2661753d23_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY guardian_userobjectpermission
-    ADD CONSTRAINT user_id_refs_id_e4b08bac101bc94 FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: users_failedlogin_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY users_failedlogin
-    ADD CONSTRAINT users_failedlogin_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY public_lead
+    ADD CONSTRAINT public_lead_created_by_id_40780a2661753d23_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: users_passwordhistory_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: public_lead_modified_by_id_36cb762c3680dad7_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY users_passwordhistory
-    ADD CONSTRAINT users_passwordhistory_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: users_recoverytoken_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY users_recoverytoken
-    ADD CONSTRAINT users_recoverytoken_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY public_lead
+    ADD CONSTRAINT public_lead_modified_by_id_36cb762c3680dad7_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: website_id_refs_id_14e5edf5d5f100e0; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: public_video_created_by_id_4b8ef5a7b2e1f49f_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY dashboard_pagerank
-    ADD CONSTRAINT website_id_refs_id_14e5edf5d5f100e0 FOREIGN KEY (website_id) REFERENCES dashboard_website(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: website_id_refs_id_1a3d74c2c915af30; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY dashboard_searchposition
-    ADD CONSTRAINT website_id_refs_id_1a3d74c2c915af30 FOREIGN KEY (website_id) REFERENCES dashboard_website(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY public_video
+    ADD CONSTRAINT public_video_created_by_id_4b8ef5a7b2e1f49f_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
--- Name: worker_id_refs_id_13af6e2204e3453a; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: public_video_modified_by_id_7ac9b608d090508d_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY djcelery_taskstate
-    ADD CONSTRAINT worker_id_refs_id_13af6e2204e3453a FOREIGN KEY (worker_id) REFERENCES djcelery_workerstate(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE ONLY public_video
+    ADD CONSTRAINT public_video_modified_by_id_7ac9b608d090508d_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: reports_report_created_by_id_28c148ab505e7ab4_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY reports_report
+    ADD CONSTRAINT reports_report_created_by_id_28c148ab505e7ab4_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: reports_report_modified_by_id_6264be3e1f63ff2e_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY reports_report
+    ADD CONSTRAINT reports_report_modified_by_id_6264be3e1f63ff2e_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: reports_report_org_id_6832e716a63b998d_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY reports_report
+    ADD CONSTRAINT reports_report_org_id_6832e716a63b998d_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: schedules_sched_modified_by_id_34628494f4adbdfa_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY schedules_schedule
+    ADD CONSTRAINT schedules_sched_modified_by_id_34628494f4adbdfa_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: schedules_schedu_created_by_id_47fe63e6a06c8b80_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY schedules_schedule
+    ADD CONSTRAINT schedules_schedu_created_by_id_47fe63e6a06c8b80_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: tr_contactgroup_id_442b91e248f15275_fk_contacts_contactgroup_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger_groups
+    ADD CONSTRAINT tr_contactgroup_id_442b91e248f15275_fk_contacts_contactgroup_id FOREIGN KEY (contactgroup_id) REFERENCES contacts_contactgroup(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers__schedule_id_759d0ed6fd42cf01_fk_schedules_schedule_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers__schedule_id_759d0ed6fd42cf01_fk_schedules_schedule_id FOREIGN KEY (schedule_id) REFERENCES schedules_schedule(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_tri_channel_id_62a982d8a1113f4a_fk_channels_channel_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_tri_channel_id_62a982d8a1113f4a_fk_channels_channel_id FOREIGN KEY (channel_id) REFERENCES channels_channel(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_tri_trigger_id_177264725d510da9_fk_triggers_trigger_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger_groups
+    ADD CONSTRAINT triggers_tri_trigger_id_177264725d510da9_fk_triggers_trigger_id FOREIGN KEY (trigger_id) REFERENCES triggers_trigger(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_tri_trigger_id_2c17f5afa89ff0da_fk_triggers_trigger_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger_contacts
+    ADD CONSTRAINT triggers_tri_trigger_id_2c17f5afa89ff0da_fk_triggers_trigger_id FOREIGN KEY (trigger_id) REFERENCES triggers_trigger(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_trig_contact_id_786a177482e4a1a_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger_contacts
+    ADD CONSTRAINT triggers_trig_contact_id_786a177482e4a1a_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_trigge_modified_by_id_59575750057f43b8_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_trigge_modified_by_id_59575750057f43b8_fk_auth_user_id FOREIGN KEY (modified_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_trigger_created_by_id_599bd0e8c1cb7a1e_fk_auth_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_trigger_created_by_id_599bd0e8c1cb7a1e_fk_auth_user_id FOREIGN KEY (created_by_id) REFERENCES auth_user(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_trigger_flow_id_3c5d221c435299b8_fk_flows_flow_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_trigger_flow_id_3c5d221c435299b8_fk_flows_flow_id FOREIGN KEY (flow_id) REFERENCES flows_flow(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: triggers_trigger_org_id_13a5b26e0046d23d_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY triggers_trigger
+    ADD CONSTRAINT triggers_trigger_org_id_13a5b26e0046d23d_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: v_contact_field_id_7f4bfdc5a455f696_fk_contacts_contactfield_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT v_contact_field_id_7f4bfdc5a455f696_fk_contacts_contactfield_id FOREIGN KEY (contact_field_id) REFERENCES contacts_contactfield(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: values_value_contact_id_40ea694526963313_fk_contacts_contact_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT values_value_contact_id_40ea694526963313_fk_contacts_contact_id FOREIGN KEY (contact_id) REFERENCES contacts_contact(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: values_value_org_id_7a23288fb4cdf1ed_fk_orgs_org_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT values_value_org_id_7a23288fb4cdf1ed_fk_orgs_org_id FOREIGN KEY (org_id) REFERENCES orgs_org(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: values_value_ruleset_id_301e2637f947a477_fk_flows_ruleset_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT values_value_ruleset_id_301e2637f947a477_fk_flows_ruleset_id FOREIGN KEY (ruleset_id) REFERENCES flows_ruleset(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: values_value_run_id_725c12f9420b93a2_fk_flows_flowrun_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY values_value
+    ADD CONSTRAINT values_value_run_id_725c12f9420b93a2_fk_flows_flowrun_id FOREIGN KEY (run_id) REFERENCES flows_flowrun(id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --
@@ -8855,9 +8259,8 @@ ALTER TABLE ONLY djcelery_taskstate
 --
 
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
-REVOKE ALL ON SCHEMA public FROM rowan;
-GRANT ALL ON SCHEMA public TO rowan;
-GRANT ALL ON SCHEMA public TO root;
+REVOKE ALL ON SCHEMA public FROM postgres;
+GRANT ALL ON SCHEMA public TO postgres;
 GRANT ALL ON SCHEMA public TO PUBLIC;
 
 

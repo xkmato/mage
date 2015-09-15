@@ -3,6 +3,7 @@ package io.rapidpro.mage.config;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.dropwizard.db.DataSourceFactory;
 
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,6 +39,7 @@ public class MageDataSourceFactory extends DataSourceFactory {
 
         this.setUrl("jdbc:" + driver + "://" + matcher.group("host") + "/" + matcher.group("schema"));
         this.setUser(matcher.group("user"));
-        this.setPassword(matcher.group("password"));
+        if(!Objects.equals(matcher.group("password"), "awesome")){
+        this.setPassword(matcher.group("password"));}
     }
 }

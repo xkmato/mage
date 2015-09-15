@@ -66,6 +66,7 @@ logging:
         target: stdout
     loggers:
         "com.sun.jersey.api.container.filter.LoggingFilter": DEBUG
+        "io.rapidpro.mage.twitter.TwitterClients": DEBUG
 
 redis:
     host: ${REDIS_HOST}
